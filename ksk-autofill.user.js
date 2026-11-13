@@ -1024,43 +1024,49 @@
     if (!p || !p.name) return say('Chưa có bệnh nhân: click chọn dòng bệnh nhân rồi bấm 📌, hoặc nhập trong ⚙.');
     const nav = getNav();
     try {
-      say('Bước 2/6: đặt Từ ngày…', 60000);
-      const addon = await waitFor(() => $('lblTuNgay') && $('grdDSBenhNhan') && $('lblTuNgay'), 30000);
-      if (!addon) throw new Error('không thấy ô "Từ ngày" hoặc danh sách bệnh nhân');
-      const fromInput = addon.parentElement.querySelector('input');
-      if (!fromInput) throw new Error('không thấy ô nhập "Từ ngày"');
-      setVal(fromInput, nav.fromDate || defaultFrom());
-      checkAbort();
-
-      say('Bước 3/6: tìm kiếm…', 60000);
-      const scope = $('timkiemDiv') || document;
-      const sb = byText(scope, 'button,input[type=button],input[type=submit],a', /Tìm kiếm/i) || byText(document, 'button,input[type=button],input[type=submit]', /Tìm kiếm/i);
-      if (!sb) throw new Error('không thấy nút "Tìm kiếm"');
-      sb.click();
-      await sleep(2000);
-      checkAbort();
-      const gName = $('gs_TENBENHNHAN'), gYear = $('gs_NAMSINH');
-      if (gName) setVal(gName, p.name);
-      if (gYear && p.year) setVal(gYear, p.year);
-      triggerGridSearch();
-      await sleep(2000);
-
-      say('Bước 4/6: chọn bệnh nhân ' + p.name + (p.stt ? ' (STT ' + p.stt + ')' : '') + '…', 60000);
-      let rows = [];
-      for (let i = 0; i < 20 && !rows.length; i++) { checkAbort(); rows = findRows(p); if (!rows.length) await sleep(700); }
-      if (!rows.length) throw new Error('không thấy bệnh nhân trong danh sách (kiểm tra họ tên/năm sinh/Số TT và "Từ ngày")');
-      const warn = rows.length > 1 && !p.stt ? 'Có ' + rows.length + ' dòng trùng, đã chọn dòng đầu (nên nhập Số TT)' : '';
-      let selected = false;
-      for (let t = 0; t < 3 && !selected; t++) {
+      // Bước 2-4: đặt Từ ngày → bấm Tìm kiếm → lọc → chọn dòng. Không thấy/không chọn được thì bấm Tìm kiếm thử lại, không dừng ngay.
+      const TRIES = 6;
+      let warn = '', selected = false, lastWhy = '';
+      for (let attempt = 1; attempt <= TRIES && !selected; attempt++) {
         checkAbort();
-        const row = findRows(p)[0];
-        if (!row) { await sleep(700); continue; }
-        const td = [...row.cells].find((c) => norm(c.textContent) === norm(p.name)) || row.cells[row.cells.length - 1];
-        td.click();
-        await sleep(800);
-        selected = isSelected(findRows(p)[0]);
+        const tag = attempt > 1 ? ' (thử lại ' + attempt + '/' + TRIES + ')' : '';
+        say('Bước 2/6: đặt Từ ngày…' + tag, 60000);
+        const addon = await waitFor(() => $('lblTuNgay') && $('grdDSBenhNhan') && $('lblTuNgay'), attempt === 1 ? 30000 : 8000);
+        const fromInput = addon && addon.parentElement.querySelector('input');
+        if (!fromInput) { lastWhy = 'không thấy ô "Từ ngày" hoặc danh sách bệnh nhân'; await sleep(1500); continue; }
+        setVal(fromInput, nav.fromDate || defaultFrom());
+        checkAbort();
+
+        say('Bước 3/6: bấm Tìm kiếm…' + tag, 60000);
+        const scope = $('timkiemDiv') || document;
+        const sb = byText(scope, 'button,input[type=button],input[type=submit],a', /Tìm kiếm/i) || byText(document, 'button,input[type=button],input[type=submit]', /Tìm kiếm/i);
+        if (!sb) { lastWhy = 'không thấy nút "Tìm kiếm"'; await sleep(1500); continue; }
+        sb.click();
+        await sleep(2000);
+        checkAbort();
+        const gName = $('gs_TENBENHNHAN'), gYear = $('gs_NAMSINH');
+        if (gName) setVal(gName, p.name);
+        if (gYear && p.year) setVal(gYear, p.year);
+        triggerGridSearch();
+        await sleep(2000);
+
+        say('Bước 4/6: chọn bệnh nhân ' + p.name + (p.stt ? ' (STT ' + p.stt + ')' : '') + '…' + tag, 60000);
+        let rows = [];
+        for (let i = 0; i < 12 && !rows.length; i++) { checkAbort(); rows = findRows(p); if (!rows.length) await sleep(700); }
+        if (!rows.length) { lastWhy = 'không thấy bệnh nhân trong danh sách (kiểm tra họ tên/năm sinh/Số TT và "Từ ngày")'; continue; }
+        warn = rows.length > 1 && !p.stt ? 'Có ' + rows.length + ' dòng trùng, đã chọn dòng đầu (nên nhập Số TT)' : '';
+        for (let t = 0; t < 3 && !selected; t++) {
+          checkAbort();
+          const row = findRows(p)[0];
+          if (!row) { await sleep(700); continue; }
+          const td = [...row.cells].find((c) => norm(c.textContent) === norm(p.name)) || row.cells[row.cells.length - 1];
+          td.click();
+          await sleep(800);
+          selected = isSelected(findRows(p)[0]);
+        }
+        if (!selected) lastWhy = 'không chọn được dòng bệnh nhân';
       }
-      if (!selected) throw new Error('không chọn được dòng bệnh nhân');
+      if (!selected) throw new Error(lastWhy + ' — đã thử ' + TRIES + ' lần');
 
       say('Bước 5/6: Khác → Nhập KSK trên 18 tuổi…', 60000);
       const toggle = $('toolbarIdbtnKHAC');
