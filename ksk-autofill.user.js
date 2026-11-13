@@ -139,6 +139,8 @@
     fire(el, 'change');
     return true;
   }
+  // Mục có thể để trống: không chặn việc điền/ký Tổng kết (khoa sắp bỏ)
+  const OPTIONAL = new Set(['COXUONGKHOP']);
   const isUnset = (v) => v === '' || v === '-1' || v === '0';
 
   // Nút mờ/không bấm được
@@ -303,7 +305,7 @@
       let tkTouched = false;
       const tkSigned = (() => { const b = $('btnHuyCaTong'); return !!b && !inactive(b); })();
       // Chỉ điền Tổng kết khi mọi mục đã có phân loại (tránh tính thiếu khi bác sĩ khác chưa điền/lưu)
-      const allClassified = SECTIONS.every((s) => { const e = $(s.cls); return !!e && !isUnset(e.value); });
+      const allClassified = SECTIONS.every((s) => { if (OPTIONAL.has(s.lck)) return true; const e = $(s.cls); return !!e && !isUnset(e.value); });
       if (filterMine && prof && !prof.tongKet) rep.tk.push('không phải bác sĩ phụ trách tổng kết');
       else if (!tkSigned && allClassified) {
         const m = maxClass();
@@ -532,11 +534,12 @@
       if (prof && prof.tongKet && !rep.fail.length) {
         const tkSigned = () => { const b = $('btnHuyCaTong'); return !!b && !inactive(b); };
         const kyTk = $('btnKyCaTong');
-        const allClassified = SECTIONS.every((x) => { const e = $(x.cls); return !!e && !isUnset(e.value); });
+        const allClassified = SECTIONS.every((x) => { if (OPTIONAL.has(x.lck)) return true; const e = $(x.cls); return !!e && !isUnset(e.value); });
         const sel = $('cboPHANLOAISUCKHOE_CHON');
         if (tkSigned()) L.push('Tổng kết: đã ký từ trước.');
         else if (!allClassified) L.push('Tổng kết: chưa ký vì còn mục chưa có phân loại.');
         else if (!sel || isUnset(sel.value)) L.push('Tổng kết: chưa ký vì chưa chọn phân loại sức khỏe (bấm Auto điền trước).');
+        else if (SECTIONS.some((x) => !OPTIONAL.has(x.lck) && !isSigned(x.lck))) L.push('Tổng kết: chưa ký vì còn mục chưa ký: ' + SECTIONS.filter((x) => !OPTIONAL.has(x.lck) && !isSigned(x.lck)).map((x) => x.label).join(', ') + ' (Tổng kết phải ký sau cùng).');
         else if (!kyTk || inactive(kyTk)) L.push('Tổng kết: nút "Ký số & In" đang mờ.');
         else {
           toast('Đang ký Tổng kết…', 120000);
