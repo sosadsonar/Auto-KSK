@@ -141,6 +141,20 @@
   }
   // Mục có thể để trống: không chặn việc điền/ký Tổng kết (khoa sắp bỏ)
   const OPTIONAL = new Set(['COXUONGKHOP']);
+
+  // Ô do chính bạn sửa tay thì script không ghi đè (nhớ trong tab, 10 phút; luồng mở phiếu mới tự xoá)
+  const EDIT_KEY = 'kskAuto.edited.v1';
+  const EDIT_TTL = 10 * 60 * 1000;
+  const readEdits = () => { try { return JSON.parse(sessionStorage.getItem(EDIT_KEY) || '{}') || {}; } catch (e) { return {}; } };
+  const userEdited = (id) => { const t = readEdits()[id]; return !!t && Date.now() - t < EDIT_TTL; };
+  const onUserEdit = (e) => {
+    if (!e.isTrusted || !e.target || !e.target.id) return; // chỉ tính thao tác thật của người dùng
+    try { const m = readEdits(); m[e.target.id] = Date.now(); sessionStorage.setItem(EDIT_KEY, JSON.stringify(m)); } catch (err) { /* bỏ qua */ }
+  };
+  document.addEventListener('input', onUserEdit, true);
+  document.addEventListener('change', onUserEdit, true);
+  // Nút ⏹ (ở thanh KSK Auto) ghi mốc giờ; các vòng lặp điền/ký dừng khi mốc mới hơn lúc bắt đầu
+  const stopped = (t0) => Number(GM_getValue('kskAuto.stop.v1', 0)) > t0;
   const isUnset = (v) => v === '' || v === '-1' || v === '0';
 
   // Nút mờ/không bấm được
@@ -254,12 +268,14 @@
   async function autoFill() {
     if (running) return;
     running = true;
+    const t0 = Date.now();
+    console.log('[KSK auto] autoFill bắt đầu', new Date().toLocaleTimeString());
     const btn = $('kskAutoFill');
     if (btn) btn.disabled = true;
     try {
       const cfg = loadCfg();
       const missingEls = await ensureRendered();
-      const rep = { filled: [], signed: [], noDoctor: [], badDoctor: [], notMine: [], missing: missingEls, msgs: [], tk: [], errs: [] };
+      const rep = { filled: [], signed: [], noDoctor: [], badDoctor: [], notMine: [], missing: missingEls, msgs: [], tk: [], errs: [], mine: [] };
       const toSave = [];
       const myId = $('user_id') ? $('user_id').value : '';
       // Nếu đăng nhập bằng nút 🔑 (profile có gán khoa / tổng kết) thì theo phân công của profile; không thì theo user_id như trước
@@ -270,6 +286,7 @@
       if (cfg.onlyMine && !myId && !prof) rep.errs.push('Không đọc được tài khoản HIS đang đăng nhập (user_id) nên không lọc theo bác sĩ');
 
       for (const s of SECTIONS) {
+        if (stopped(t0)) { rep.errs.push('đã dừng theo yêu cầu (⏹)'); break; }
         // Bác sĩ khoa này không điền hộ bác sĩ khoa khác: chỉ làm các mục gán cho tài khoản đang đăng nhập
         const assigned = cfg.doctors[s.lck] || '';
         if (filterMine && prof) {
@@ -282,17 +299,19 @@
           const el = $(f.id);
           const val = cfg[f.cfg];
           if (!el || !val) continue;
+          if (userEdited(f.id)) { rep.mine.push(s.label); continue; }
           if (!cfg.overwrite && el.value.trim() !== '') continue;
           if (setVal(el, val)) touched = true;
         }
 
         const c = $(s.cls);
-        if (c && (cfg.overwrite || isUnset(c.value))) { if (setSelect(c, cfg.phanLoai)) touched = true; }
+        if (c && !userEdited(s.cls) && (cfg.overwrite || isUnset(c.value))) { if (setSelect(c, cfg.phanLoai)) touched = true; }
 
         const d = $(s.doc);
         // đang lọc theo bác sĩ đăng nhập → chính bác sĩ đó là người khám mục này (không cần đặt trong ⚙)
         const dv = filterMine && myId ? myId : cfg.doctors[s.lck];
-        if (d) {
+        if (d && userEdited(s.doc)) { /* bác sĩ do bạn tự chọn: giữ nguyên */ }
+        else if (d) {
           if (!dv) rep.noDoctor.push(s.label);
           else if (d.value !== dv) {
             if (setSelect(d, dv)) touched = true; else rep.badDoctor.push(s.label);
@@ -310,12 +329,12 @@
       else if (!tkSigned && allClassified) {
         const m = maxClass();
         const sel = $('cboPHANLOAISUCKHOE_CHON');
-        if (m && sel && (cfg.overwrite || isUnset(sel.value))) {
+        if (m && sel && !userEdited('cboPHANLOAISUCKHOE_CHON') && (cfg.overwrite || isUnset(sel.value))) {
           if (setSelect(sel, String(m))) { rep.tk.push('Phân loại sức khỏe = Loại ' + ROMAN[m]); tkTouched = true; }
         }
         if (cfg.summary) {
           const ta = $('txtTINHTRANGBENH');
-          if (ta && (cfg.overwrite || !ta.value.trim())) {
+          if (ta && !userEdited('txtTINHTRANGBENH') && (cfg.overwrite || !ta.value.trim())) {
             if (setVal(ta, buildSummary(cfg))) { rep.tk.push('Đã điền ghi chú tổng kết'); tkTouched = true; }
           }
         }
@@ -325,6 +344,7 @@
       // Lưu
       if (cfg.saveMode === 'section') {
         for (const s of toSave) {
+          if (stopped(t0)) { rep.errs.push('đã dừng theo yêu cầu (⏹) trước khi lưu hết'); break; }
           const b = findSaveBtn(s.lck);
           if (!b) { rep.errs.push('Không thấy nút Lưu của ' + s.label); continue; }
           b.click();
@@ -344,8 +364,10 @@
       if (rep.noDoctor.length) L.push('⚠ Chưa đặt bác sĩ (vào ⚙ Cài đặt): ' + rep.noDoctor.join(', '));
       if (rep.badDoctor.length) L.push('⚠ Bác sĩ đã cài không có trong danh sách của: ' + rep.badDoctor.join(', '));
       if (rep.missing.length) L.push('⚠ Không tìm thấy ô: ' + rep.missing.join(', '));
+      if (rep.mine.length) L.push('Giữ nguyên các ô bạn đã tự sửa ở: ' + [...new Set(rep.mine)].join(', '));
       if (rep.errs.length) L.push('⚠ ' + rep.errs.join('; '));
       if (rep.msgs.length) L.push('Thông báo của HIS: ' + rep.msgs.join(' | '));
+      console.log('[KSK auto] autoFill xong', new Date().toLocaleTimeString(), L);
       toast(L, 25000);
       return L;
     } catch (e) {
@@ -496,6 +518,8 @@
   async function autoSign() {
     if (signing) return;
     signing = true;
+    const t0 = Date.now();
+    console.log('[KSK auto] autoSign bắt đầu', new Date().toLocaleTimeString());
     const btn = $('kskAutoSign');
     if (btn) btn.disabled = true;
     try {
@@ -508,6 +532,7 @@
       // đánh dấu đang ký để script ở trang SmartCA / hộp e-Seal tự điền tài khoản CA
       GM_setValue('kskAuto.sign.v1', JSON.stringify({ t: Date.now() }));
       for (const s of SECTIONS) {
+        if (stopped(t0)) { rep.fail.push('đã dừng theo yêu cầu (⏹)'); break; }
         const mine = !cfg.onlyMine ? true : prof ? (prof.sections || []).includes(s.lck) : (cfg.doctors[s.lck] || '') === myId;
         if (!mine) continue;
         if (isSigned(s.lck)) { rep.signed.push(s.label); continue; }
@@ -519,6 +544,7 @@
         ky.click();
         let done = false;
         for (let i = 0; i < 240 && !done; i++) { // tối đa ~2 phút / mục
+          if (stopped(t0)) break;
           await sleep(500);
           acceptAlertify().forEach((m) => rep.msgs.push(s.label + ': ' + m));
           done = isSigned(s.lck);
@@ -812,6 +838,10 @@
   async function batchStep() {
     const b = getBatch();
     if (!b || b.phase !== 'run') return;
+    // mỗi bác sĩ chỉ chạy đúng 1 lần: khung KSK có tải lại (vd. sau khi bạn bấm Lưu) cũng không chạy lại
+    if (b.stepDone === b.idx) { console.log('[KSK auto] batchStep đã chạy cho bác sĩ này, bỏ qua'); return; }
+    b.stepDone = b.idx; setBatch(b);
+    console.log('[KSK auto] batchStep chạy', b.mode, 'bác sĩ', who(b), new Date().toLocaleTimeString());
     const ready = await waitFor(() => $('txtTUANHOAN') && $('btn_ChiDinhCls') && window.__kskRun, 60000);
     if (!ready) return batchFail('không thấy form KSK');
     await sleep(1500);
@@ -952,7 +982,7 @@
   // ───────────────────────── Trang Thiết lập phòng ─────────────────────────
   async function initSelDept() {
     rerender = () => {};
-    bar([btn('⏏ Đăng xuất', () => { clearBatch(); doLogout(); }), btn('⚙ Cài đặt', openSettings)]);
+    bar([btn('⏏ Đăng xuất', () => { clearBatch(); GM_setValue('kskAuto.stop.v1', Date.now()); doLogout(); }), btn('⚙ Cài đặt', openSettings)]);
     const f = getFlow();
     if (!f) return;
     if (f.stage === 'kb') { gotoUrl(URL_KB); return; }          // đã bấm Thiết lập phòng, trang vừa tải lại
@@ -1023,6 +1053,7 @@
 
   async function openPatient() {
     aborted = false;
+    try { sessionStorage.removeItem('kskAuto.edited.v1'); } catch (e) { /* bỏ qua */ }
     const p = readJSON(KEY.patient, null);
     if (!p || !p.name) return say('Chưa có bệnh nhân: click chọn dòng bệnh nhân rồi bấm 📌, hoặc nhập trong ⚙.');
     const nav = getNav();
@@ -1105,8 +1136,8 @@
         say('Đã nhớ: ' + s.name + ' | ' + s.year + (s.stt ? ' | STT ' + s.stt : ' (không đọc được Số TT)'), 8000);
       }, 'Lưu họ tên, năm sinh, Số TT của dòng đang chọn'),
       btn('▶ Mở phiếu KSK', openPatient, 'Tự tìm đúng bệnh nhân đã nhớ và mở phiếu KSK trên 18 tuổi'),
-      btn('⏹', () => { aborted = true; clearFlow(); clearBatch(); say('Đã dừng', 3000); }, 'Dừng luồng tự động (kể cả chạy tất cả)'),
-      btn('⏏', () => { clearBatch(); doLogout(); }, 'Đăng xuất HIS'),
+      btn('⏹', () => { aborted = true; clearFlow(); clearBatch(); GM_setValue('kskAuto.stop.v1', Date.now()); say('Đã dừng (kể cả Auto điền / ký số đang chạy)', 4000); }, 'Dừng luồng tự động, chạy tất cả, và Auto điền/ký số đang chạy'),
+      btn('⏏', () => { clearBatch(); GM_setValue('kskAuto.stop.v1', Date.now()); doLogout(); }, 'Đăng xuất HIS'),
       btn('⚙', openSettings),
     ]);
     const f = getFlow();
