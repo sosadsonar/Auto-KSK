@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         HIS - KSK >18 tuổi: Auto điền
 // @namespace    https://bvbacgiang.vncare.vn/
-// @version      0.4.0
+// @version      0.5.0
 // @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK. Ký số sẽ bổ sung sau.
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis/login/login.jsp*
+// @match        https://bvbacgiang.vncare.vn/vnpthis
 // @match        https://bvbacgiang.vncare.vn/vnpthis/*
 // @match        https://ausca.vnpt.vn/Account/Login*
 // @run-at       document-idle
@@ -192,6 +193,14 @@
 
   // Bác sĩ đăng nhập bằng nút 🔑 (profile có gán khoa / tổng kết) → theo phân công của profile; không thì null
   // Đối chiếu với thanh "Người dùng: … - LGG.xxx" của HIS: nếu đang đăng nhập tài khoản khác thì không áp phân công của profile
+  // Nhiều bác sĩ cùng tick một mục: chỉ người được chọn (kskAuto.assign.v1: {mã mục | 'TONGKET': hisUser}) làm mục đó
+  function effectiveOf(p, ps) {
+    let assign = {};
+    try { assign = JSON.parse(GM_getValue('kskAuto.assign.v1', '') || '{}') || {}; } catch (e) { /* bỏ qua */ }
+    const owners = (l) => ps.filter((q) => (l === 'TONGKET' ? q.tongKet : (q.sections || []).includes(l))).map((q) => q.hisUser);
+    const ok = (l) => { const o = owners(l), a = assign[l]; return o.length < 2 || !a || !o.includes(a) || a === p.hisUser; };
+    return Object.assign({}, p, { sections: (p.sections || []).filter(ok), tongKet: !!p.tongKet && ok('TONGKET') });
+  }
   let profMismatch = '';
   function currentProfile() {
     profMismatch = '';
@@ -207,7 +216,7 @@
           return null;
         }
       } catch (e) { /* không đọc được khung ngoài → tin profile */ }
-      return p;
+      return effectiveOf(p, ps);
     } catch (e) { return null; }
   }
 
@@ -265,7 +274,7 @@
   }
 
   let running = false;
-  async function autoFill() {
+  async function autoFill(opts) {
     if (running) return;
     running = true;
     const t0 = Date.now();
@@ -273,6 +282,8 @@
     const btn = $('kskAutoFill');
     if (btn) btn.disabled = true;
     try {
+      // bấm tay: nếu mục bạn phụ trách trùng với bác sĩ khác mà chưa chọn ai làm thì hỏi trước (luồng chạy tất cả đã hỏi từ đầu)
+      if (!(opts && opts.batch) && window.__kskAssign && !(await window.__kskAssign.ensure())) { toast('Đã huỷ, chưa điền gì.'); return ['Đã huỷ']; }
       const cfg = loadCfg();
       const missingEls = await ensureRendered();
       const rep = { filled: [], signed: [], noDoctor: [], badDoctor: [], notMine: [], missing: missingEls, msgs: [], tk: [], errs: [], mine: [] };
@@ -515,7 +526,7 @@
   }
 
   let signing = false;
-  async function autoSign() {
+  async function autoSign(opts) {
     if (signing) return;
     signing = true;
     const t0 = Date.now();
@@ -523,6 +534,7 @@
     const btn = $('kskAutoSign');
     if (btn) btn.disabled = true;
     try {
+      if (!(opts && opts.batch) && window.__kskAssign && !(await window.__kskAssign.ensure())) { toast('Đã huỷ, chưa ký gì.'); return ['Đã huỷ']; }
       const cfg = loadCfg();
       await ensureRendered();
       const prof = currentProfile();
@@ -624,7 +636,8 @@
   const URL_SELDEPT = 'https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp?func=../admin/SelDept';
   const URL_KB = 'https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp?func=../ngoaitru/NGT02K001_KB_MHC_vs2&type=1';
 
-  const IS_LOGIN = /\/login\/login\.jsp/i.test(location.pathname);
+  // Trang đăng nhập: login.jsp và cả trang gốc /vnpthis/ (nhận diện thêm bằng việc thấy ô đăng nhập)
+  const IS_LOGIN = /\/login\/login\.jsp|\/vnpthis\/?$|\/vnpthis\/(index|login)[^/]*$/i.test(location.pathname) && window.top === window;
   const IS_SEL = /func=\.\.\/admin\/SelDept/.test(location.search);
   const IS_KB = /func=\.\.\/ngoaitru\/NGT02K001_KB_MHC_vs2/.test(location.search);
   const IS_KSK = /KSK_TREN18TUOI_TOANDAN_QD2062/.test(location.search);
@@ -640,6 +653,7 @@
     flow: 'kskAuto.flow.v1',         // {stage: 'room' | 'kb' | 'ksk', t}
     nav: 'kskAuto.nav.v1',           // {fromDate, dept, sub}
     cur: 'kskAuto.cur.v1',           // {hisUser} bác sĩ vừa đăng nhập bằng nút 🔑
+    assign: 'kskAuto.assign.v1',     // {mã mục | 'TONGKET': hisUser} chọn người làm khi nhiều bác sĩ cùng phụ trách
     batch: 'kskAuto.batch.v1',       // chạy tất cả: {mode:'fill'|'sign', queue:[hisUser], idx, phase:'run'|'next', tried, results, t}
   };
   const SECS = [
@@ -804,14 +818,96 @@
     if (!loginAs(p)) clearBatch();
   }
 
-  function startBatch(mode) {
+  // ───────────────────────── Chia mục khi nhiều bác sĩ cùng phụ trách ─────────────────────────
+  const SECS_TK = SECS.concat([{ lck: 'TONGKET', label: 'Tổng kết' }]);
+  const ownersOf = (ps, l) => ps.filter((q) => (l === 'TONGKET' ? q.tongKet : (q.sections || []).includes(l)));
+  const conflictsOf = (ps) => SECS_TK.map((x) => Object.assign({}, x, { cands: ownersOf(ps, x.lck) })).filter((x) => x.cands.length > 1);
+  const effectiveOf = (p, ps, assign) => {
+    const ok = (l) => { const o = ownersOf(ps, l).map((q) => q.hisUser), a = assign[l]; return o.length < 2 || !a || !o.includes(a) || a === p.hisUser; };
+    return { sections: (p.sections || []).filter(ok), tongKet: !!p.tongKet && ok('TONGKET') };
+  };
+
+  // Hộp chọn: mỗi mục trùng chọn 1 bác sĩ; có nút "Tất cả → bác sĩ X". Trả về {mục: hisUser} hoặc null nếu huỷ.
+  function askAssign(conflicts, assign, title) {
+    return new Promise((resolve) => {
+      const chosen = {};
+      conflicts.forEach((c) => { if (c.cands.some((q) => q.hisUser === assign[c.lck])) chosen[c.lck] = assign[c.lck]; });
+      const radios = {};
+      const note = h('div', { style: 'color:#b00;min-height:18px;margin-top:6px' });
+      const setChoice = (lck, user) => { chosen[lck] = user; (radios[lck] || []).forEach((r) => { r.checked = r.value === user; }); };
+      const people = [];
+      conflicts.forEach((c) => c.cands.forEach((q) => { if (!people.some((x) => x.hisUser === q.hisUser)) people.push(q); }));
+      const done = (v) => { overlay.remove(); resolve(v); };
+      const rows = conflicts.map((c) => {
+        radios[c.lck] = [];
+        return h('div', { style: 'display:flex;align-items:center;gap:14px;padding:4px 0;border-bottom:1px solid #eee;flex-wrap:wrap' },
+          h('div', { style: 'width:170px;font-weight:600' }, c.label),
+          ...c.cands.map((q) => {
+            const r = h('input', { type: 'radio', name: 'kskAsg_' + c.lck, value: q.hisUser });
+            r.checked = chosen[c.lck] === q.hisUser;
+            r.addEventListener('change', () => { chosen[c.lck] = q.hisUser; });
+            radios[c.lck].push(r);
+            return h('label', { style: 'margin:0;font-weight:400;white-space:nowrap' }, r, ' ' + (q.label || q.hisUser));
+          }));
+      });
+      const quick = people.map((q) => btn('Tất cả → ' + (q.label || q.hisUser), () => {
+        conflicts.forEach((c) => { if (c.cands.some((x) => x.hisUser === q.hisUser)) setChoice(c.lck, q.hisUser); });
+      }, 'Chọn bác sĩ này cho mọi mục mà bác sĩ đó có tick'));
+      const box = h('div', { style: 'background:#fff;width:min(820px,95vw);max-height:90vh;overflow:auto;border-radius:6px;padding:16px;font-size:13px;color:#222' },
+        h('h4', { style: 'margin:0 0 6px' }, title || '🧩 Nhiều bác sĩ cùng phụ trách một mục — chọn ai làm'),
+        h('div', { style: 'color:#555;margin-bottom:6px' }, 'Chỉ bác sĩ được chọn mới điền / ký mục đó. Lựa chọn được nhớ cho các lần sau.'),
+        h('div', { style: 'margin-bottom:6px' }, ...quick),
+        ...rows, note,
+        h('div', { style: 'margin-top:10px;display:flex;gap:8px;justify-content:flex-end' },
+          h('button', { type: 'button', class: 'btn btn-sm btn-default', onclick: () => done(null) }, 'Huỷ'),
+          h('button', {
+            type: 'button', class: 'btn btn-sm btn-primary',
+            onclick: () => {
+              const miss = conflicts.filter((c) => !chosen[c.lck]).map((c) => c.label);
+              if (miss.length) { note.textContent = 'Chưa chọn: ' + miss.join(', '); return; }
+              done(Object.assign({}, assign, chosen));
+            },
+          }, 'Xác nhận')));
+      const overlay = h('div', { style: 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:2147483002;display:flex;align-items:center;justify-content:center' }, box);
+      document.body.appendChild(overlay);
+    });
+  }
+
+  // Bấm tay Auto điền / Auto ký số trong phiếu KSK: hỏi nếu mục của bác sĩ đang đăng nhập còn trùng mà chưa chọn người làm
+  window.__kskAssign = {
+    async ensure() {
+      const ps = readJSON(KEY.profiles, []);
+      const cur = readJSON(KEY.cur, null);
+      const me = cur && ps.find((p) => p.hisUser === cur.hisUser);
+      if (!me) return true;
+      const assign = readJSON(KEY.assign, {}) || {};
+      const conf = conflictsOf(ps).filter((c) => c.cands.some((q) => q.hisUser === me.hisUser));
+      if (!conf.some((c) => !c.cands.some((q) => q.hisUser === assign[c.lck]))) return true;
+      const res = await askAssign(conf, assign);
+      if (!res) return false;
+      writeJSON(KEY.assign, res);
+      return true;
+    },
+  };
+
+  // Luồng chạy tất cả: hỏi trước khi bắt đầu (có điền sẵn lựa chọn lần trước), rồi mới chạy
+  async function startBatch(mode) {
     const patient = readJSON(KEY.patient, null);
     if (!patient || !patient.name) return say('Chưa có bệnh nhân: vào trang Khám bệnh, chọn dòng bệnh nhân rồi bấm 📌 (hoặc nhập trong ⚙).');
+    const all = readJSON(KEY.profiles, []).filter((p) => p.hisUser);
+    let assign = readJSON(KEY.assign, {}) || {};
+    const conf = conflictsOf(all);
+    if (conf.length) {
+      const res = await askAssign(conf, assign);
+      if (!res) return say('Đã huỷ, chưa chạy gì.', 4000);
+      assign = res;
+      writeJSON(KEY.assign, assign);
+    }
     // Tổng kết cần các mục khác đã có phân loại → bác sĩ phụ trách tổng kết đi sau cùng
-    const ps = readJSON(KEY.profiles, []).filter((p) => p.hisUser && p.hisPass && ((p.sections || []).length || p.tongKet));
-    if (!ps.length) return say('Chưa có bác sĩ nào đủ tài khoản HIS và đã tick khoa phụ trách (vào ⚙).');
-    ps.sort((a, c) => (a.tongKet ? 1 : 0) - (c.tongKet ? 1 : 0));
-    batchLogin({ mode, queue: ps.map((p) => p.hisUser), idx: 0, phase: 'run', tried: -1, results: [] });
+    const withEff = all.filter((p) => p.hisPass).map((p) => ({ p, e: effectiveOf(p, all, assign) })).filter((x) => x.e.sections.length || x.e.tongKet);
+    if (!withEff.length) return say('Chưa có bác sĩ nào đủ tài khoản HIS và đã tick/được chọn mục phụ trách (vào ⚙).');
+    withEff.sort((a, c) => (a.e.tongKet ? 1 : 0) - (c.e.tongKet ? 1 : 0));
+    batchLogin({ mode, queue: withEff.map((x) => x.p.hisUser), idx: 0, phase: 'run', tried: -1, results: [] });
   }
 
   // Trang login: tiếp tục chạy tất cả (sau khi đăng xuất) hoặc kết thúc
@@ -846,7 +942,7 @@
     if (!ready) return batchFail('không thấy form KSK');
     await sleep(1500);
     let lines = [];
-    try { lines = (b.mode === 'sign' ? await window.__kskRun.autoSign() : await window.__kskRun.autoFill()) || []; } catch (e) { lines = ['Lỗi: ' + e.message]; }
+    try { lines = (b.mode === 'sign' ? await window.__kskRun.autoSign({ batch: true }) : await window.__kskRun.autoFill({ batch: true })) || []; } catch (e) { lines = ['Lỗi: ' + e.message]; }
     await sleep(1500);
     batchNext(lines);
   }
@@ -949,6 +1045,13 @@
     return names.length ? 'Phụ trách: ' + names.join(', ') : 'Chưa gán khoa (vào ⚙)';
   };
 
+  async function initLoginWhenReady() {
+    if (/login\.jsp/i.test(location.pathname)) return initLogin();
+    // trang gốc /vnpthis/: chỉ coi là trang đăng nhập khi thật sự có ô mật khẩu (form có thể dựng sau khi tải)
+    const f = await waitFor(() => { const e = findLoginEls(); return e.pw && e.u && e.b ? e : null; }, 12000);
+    if (f) initLogin(); else initOther(); // đã đăng nhập (không có form) → xử lý như trang khác
+  }
+
   function initLogin() {
     GM_setValue(KEY.cur, ''); // đăng nhập tay thì không áp phân công theo profile
     const holder = bar([]);
@@ -961,14 +1064,29 @@
         h('div', { style: 'border-top:1px solid #ddd;margin-top:4px;padding-top:4px' },
           btn('▶▶ Điền tất cả', () => startBatch('fill'), 'Lần lượt từng bác sĩ: đăng nhập → mở phiếu → Auto điền → đăng xuất'),
           btn('▶▶ Ký số tất cả', () => startBatch('sign'), 'Lần lượt từng bác sĩ: đăng nhập → mở phiếu → Auto ký số → đăng xuất')),
-        h('div', {}, btn('⚙ Tài khoản & cài đặt', openSettings)));
+        h('div', {}, btn('🧩 Chia mục trùng', async () => {
+          const ps = readJSON(KEY.profiles, []).filter((p) => p.hisUser);
+          const conf = conflictsOf(ps);
+          if (!conf.length) return say('Không có mục nào trùng giữa các bác sĩ.', 4000);
+          const res = await askAssign(conf, readJSON(KEY.assign, {}) || {});
+          if (res) { writeJSON(KEY.assign, res); say('Đã lưu cách chia mục.', 4000); }
+        }, 'Chọn ai làm mục mà nhiều bác sĩ cùng tick'), btn('⚙ Tài khoản & cài đặt', openSettings)));
     };
     rerender();
     batchOnLogin();
   }
 
+  // Ô đăng nhập: theo id của HIS; không có thì dò theo kiểu ô (trang gốc có thể khác login.jsp)
+  function findLoginEls() {
+    let u = $('login-username'), pw = $('login-password'), b = $('btn-login');
+    if (!pw) pw = document.querySelector('input[type=password]');
+    if (!u && pw) { const form = pw.form || document; u = [...form.querySelectorAll('input')].find((i) => ['text', 'email', ''].includes((i.type || '').toLowerCase()) && i !== pw && i.type !== 'hidden'); }
+    if (!b && pw) { const form = pw.form || document; b = [...form.querySelectorAll('button,input[type=submit],input[type=button],a')].find((x) => /đăng nhập|dang nhap|login/i.test((x.textContent || x.value || '').trim())) || form.querySelector('button[type=submit],input[type=submit]'); }
+    return { u, pw, b };
+  }
+
   function loginAs(p) {
-    const u = $('login-username'), pw = $('login-password'), b = $('btn-login');
+    const { u, pw, b } = findLoginEls();
     if (!u || !pw || !b) { say('Không thấy ô đăng nhập của HIS'); return false; }
     if (!p.hisUser || !p.hisPass) { say('Tài khoản này thiếu tên đăng nhập/mật khẩu HIS (vào ⚙ để bổ sung)'); return false; }
     setFlow('room');
@@ -1169,7 +1287,7 @@
     else if (f.stage === 'kb') gotoUrl(URL_KB);
   }
 
-  if (IS_LOGIN) initLogin();
+  if (IS_LOGIN) initLoginWhenReady();
   else if (IS_SEL) initSelDept();
   else if (IS_KB) initKB();
   else if (IS_KSK) initKSK();
