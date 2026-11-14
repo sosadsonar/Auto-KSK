@@ -3,11 +3,14 @@
 // @namespace    https://bvbacgiang.vncare.vn/
 // @version      0.5.0
 // @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK. Ký số sẽ bổ sung sau.
+// @author       sosadsonar
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis/login/login.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis
 // @match        https://bvbacgiang.vncare.vn/vnpthis/*
 // @match        https://ausca.vnpt.vn/Account/Login*
+// @updateURL    https://raw.githubusercontent.com/sosadsonar/Auto-KSK/main/ksk-autofill.user.js
+// @downloadURL  https://raw.githubusercontent.com/sosadsonar/Auto-KSK/main/ksk-autofill.user.js
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
