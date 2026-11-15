@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HIS - KSK >18 tuổi: Auto điền
 // @namespace    https://bvbacgiang.vncare.vn/
-// @version      0.5.0
+// @version      0.5.1
 // @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK. Ký số sẽ bổ sung sau.
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis/login/login.jsp*
