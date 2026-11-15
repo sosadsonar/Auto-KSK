@@ -3,14 +3,11 @@
 // @namespace    https://bvbacgiang.vncare.vn/
 // @version      0.5.0
 // @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK. Ký số sẽ bổ sung sau.
-// @author       sosadsonar
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis/login/login.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis
 // @match        https://bvbacgiang.vncare.vn/vnpthis/*
 // @match        https://ausca.vnpt.vn/Account/Login*
-// @updateURL    https://raw.githubusercontent.com/sosadsonar/Auto-KSK/main/ksk-autofill.user.js
-// @downloadURL  https://raw.githubusercontent.com/sosadsonar/Auto-KSK/main/ksk-autofill.user.js
 // @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -44,6 +41,9 @@
     onlyMine: true,            // true = chỉ điền các mục gán cho bác sĩ đang đăng nhập (user_id của HIS)
     summary: true,             // điền "Tình trạng bệnh / Ghi chú" ở Tổng kết = tổng hợp các mục đã điền
     doctors: {},               // lck -> value của bác sĩ
+    exclude: ['COXUONGKHOP'],  // mục không bắt buộc: để trống/chưa ký vẫn không chặn Tổng kết
+    autoGender: true,          // bệnh nhân Nam → tự loại trừ Sản phụ khoa
+    tkForce: false,            // luồng chạy tất cả: true = vẫn ký Tổng kết (chỉ cảnh báo) khi còn mục chưa ký
   };
 
   // lck = giá trị thuộc tính loai-chuyen-khoa của nút Lưu / Ký số
@@ -144,7 +144,27 @@
     return true;
   }
   // Mục có thể để trống: không chặn việc điền/ký Tổng kết (khoa sắp bỏ)
-  const OPTIONAL = new Set(['COXUONGKHOP']);
+  // Bệnh nhân nam: Sản phụ khoa không cần khám/ký
+  const isMale = () => {
+    const t = $('txtGIOITINH');
+    if (t && t.value.trim()) return /^nam$/i.test(t.value.trim());
+    const r = document.querySelector('input[name="labelGIOITINHID"]:checked');
+    return !!r && r.value === '1';
+  };
+  // Hộp thoại: luôn có thanh cuộn; chiều cao theo phần nhìn thấy (khung KSK có thể cao hơn màn hình)
+  const maxBoxH = () => {
+    let H = window.innerHeight;
+    try { H = Math.min(H, window.top.innerHeight - 140); } catch (e) { /* khác miền */ }
+    return Math.max(280, Math.floor(H * 0.92));
+  };
+  const boxStyle = (w) => 'background:#fff;width:min(' + w + 'px,94vw);max-height:' + maxBoxH() + 'px;overflow-y:scroll;margin:auto;border-radius:6px;padding:16px;font-size:13px;color:#222';
+  const overlayStyle = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:2147483001;display:flex;overflow:auto;padding:20px 0;box-sizing:border-box';
+  // Tập mục không chặn Tổng kết: danh sách loại trừ trong ⚙ (+ Sản phụ khoa nếu bệnh nhân nam)
+  const optionalSet = (cfg) => {
+    const set = new Set(cfg.exclude || []);
+    if (cfg.autoGender && isMale()) set.add('SANPHUKHOA');
+    return set;
+  };
 
   // Ô do chính bạn sửa tay thì script không ghi đè (nhớ trong tab, 10 phút; luồng mở phiếu mới tự xoá)
   const EDIT_KEY = 'kskAuto.edited.v1';
@@ -288,6 +308,7 @@
       // bấm tay: nếu mục bạn phụ trách trùng với bác sĩ khác mà chưa chọn ai làm thì hỏi trước (luồng chạy tất cả đã hỏi từ đầu)
       if (!(opts && opts.batch) && window.__kskAssign && !(await window.__kskAssign.ensure())) { toast('Đã huỷ, chưa điền gì.'); return ['Đã huỷ']; }
       const cfg = loadCfg();
+      const opt = optionalSet(cfg);
       const missingEls = await ensureRendered();
       const rep = { filled: [], signed: [], noDoctor: [], badDoctor: [], notMine: [], missing: missingEls, msgs: [], tk: [], errs: [], mine: [] };
       const toSave = [];
@@ -338,7 +359,8 @@
       let tkTouched = false;
       const tkSigned = (() => { const b = $('btnHuyCaTong'); return !!b && !inactive(b); })();
       // Chỉ điền Tổng kết khi mọi mục đã có phân loại (tránh tính thiếu khi bác sĩ khác chưa điền/lưu)
-      const allClassified = SECTIONS.every((s) => { if (OPTIONAL.has(s.lck)) return true; const e = $(s.cls); return !!e && !isUnset(e.value); });
+      const unclassified = SECTIONS.filter((s) => { if (opt.has(s.lck)) return false; const e = $(s.cls); return !(e && !isUnset(e.value)); });
+      const allClassified = !unclassified.length;
       if (filterMine && prof && !prof.tongKet) rep.tk.push('không phải bác sĩ phụ trách tổng kết');
       else if (!tkSigned && allClassified) {
         const m = maxClass();
@@ -353,7 +375,7 @@
           }
         }
       } else if (tkSigned) rep.tk.push('Tổng kết đã ký, bỏ qua');
-      else rep.tk.push('chưa điền vì còn mục chưa có phân loại (bác sĩ khác chưa điền/lưu)');
+      else rep.tk.push('chưa điền vì còn mục chưa có phân loại: ' + unclassified.map((x) => x.label).join(', ') + ' (bác sĩ khác chưa điền/lưu; nếu mục đó không cần thì loại trừ trong ⚙)');
 
       // Lưu
       if (cfg.saveMode === 'section') {
@@ -450,9 +472,16 @@
     const chkOver = h('input', { type: 'checkbox' }); chkOver.checked = !!cfg.overwrite;
     const chkMine = h('input', { type: 'checkbox' }); chkMine.checked = !!cfg.onlyMine;
     const chkSum = h('input', { type: 'checkbox' }); chkSum.checked = !!cfg.summary;
+    const chkGender = h('input', { type: 'checkbox' }); chkGender.checked = !!cfg.autoGender;
+    const chkForce = h('input', { type: 'checkbox' }); chkForce.checked = !!cfg.tkForce;
+    const exChk = SECTIONS.map((x) => {
+      const c = h('input', { type: 'checkbox' });
+      c.checked = (cfg.exclude || []).includes(x.lck);
+      return { lck: x.lck, el: c, node: h('label', { style: 'margin:0 12px 0 0;font-weight:400;white-space:nowrap' }, c, ' ' + x.label.replace(/^.*› /, '')) };
+    });
 
     const grid = 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:6px 0';
-    const box = h('div', { style: 'background:#fff;width:min(960px,94vw);max-height:90vh;overflow:auto;border-radius:6px;padding:16px;font-size:13px;color:#222' },
+    const box = h('div', { style: boxStyle(960) },
       h('h4', { style: 'margin:0 0 8px' }, '⚙ Cài đặt Auto điền KSK'),
       h('div', { style: 'font-weight:700;margin-top:8px' }, '1) Bác sĩ khám của từng mục (không bắt buộc: khi bác sĩ đăng nhập và bấm Auto điền, script tự chọn chính bác sĩ đó ở các mục của họ)'),
       docs.length ? '' : h('div', { style: 'color:#b00' }, 'Chưa đọc được danh sách bác sĩ (trang chưa tải xong). Đóng rồi mở lại sau vài giây.'),
@@ -479,6 +508,11 @@
       h('div', { style: 'margin:4px 0' }, h('label', { style: 'margin:0' }, chkMine,
         ' Chỉ điền các mục gán cho bác sĩ đang đăng nhập (tài khoản HIS hiện tại: user_id ' + ($('user_id') ? $('user_id').value : '?') + ')')),
       h('div', { style: 'margin:4px 0' }, h('label', { style: 'margin:0' }, chkSum, ' Điền "Tình trạng bệnh / Ghi chú" ở Tổng kết (tổng hợp các mục khác "Bình thường"/"Không"; nếu không có thì ghi "Không")')),
+      h('div', { style: 'font-weight:700;margin-top:12px' }, '4) Mục không bắt buộc (loại trừ) — không chặn việc điền/ký Tổng kết'),
+      h('div', { style: 'color:#666;margin-bottom:4px' }, 'Mục nào không cần (ví dụ khoa đã bỏ) thì tick: để trống / chưa ký vẫn không cản Tổng kết. Chỉ là cảnh báo, không chặn luồng ký.'),
+      h('div', { style: 'line-height:1.9' }, ...exChk.map((c) => c.node)),
+      h('div', { style: 'margin:6px 0 0' }, h('label', { style: 'margin:0;font-weight:400' }, chkGender, ' Bệnh nhân Nam: tự loại trừ Sản phụ khoa')),
+      h('div', { style: 'margin:4px 0' }, h('label', { style: 'margin:0;font-weight:400' }, chkForce, ' Luồng chạy tất cả: vẫn ký Tổng kết khi còn mục chưa ký (chỉ cảnh báo). Tắt = bỏ qua Tổng kết, ghi cảnh báo và đi tiếp.')),
       h('div', { style: 'margin-top:12px;display:flex;gap:8px;justify-content:flex-end' },
         h('button', {
           type: 'button', class: 'btn btn-sm btn-default',
@@ -495,6 +529,9 @@
             n.overwrite = chkOver.checked;
             n.onlyMine = chkMine.checked;
             n.summary = chkSum.checked;
+            n.exclude = exChk.filter((c) => c.el.checked).map((c) => c.lck);
+            n.autoGender = chkGender.checked;
+            n.tkForce = chkForce.checked;
             n.doctors = {};
             Object.entries(docSel).forEach(([k, s]) => { if (s.value) n.doctors[k] = s.value; });
             saveCfg(n);
@@ -505,7 +542,7 @@
 
     document.body.appendChild(h('div', {
       id: 'kskModal',
-      style: 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:2147483001;display:flex;align-items:center;justify-content:center',
+      style: overlayStyle,
     }, box));
   }
 
@@ -528,6 +565,31 @@
     return msgs;
   }
 
+  // Hộp cảnh báo khi ký Tổng kết mà còn mục chưa ký: không chặn, cho bạn chọn
+  function askTkWarn(miss) {
+    return new Promise((resolve) => {
+      const done = (v) => { overlay.remove(); resolve(v); };
+      const names = miss.map((x) => x.label).join(', ');
+      const chk = h('input', { type: 'checkbox' });
+      const box = h('div', { style: boxStyle(560) },
+        h('h4', { style: 'margin:0 0 8px' }, '⚠ Còn mục chưa ký / chưa phân loại'),
+        h('div', { style: 'margin-bottom:8px' }, names),
+        h('div', { style: 'color:#555;margin-bottom:8px' }, 'Ví dụ bệnh nhân nam không có Sản phụ khoa. Bạn muốn làm gì với Tổng kết?'),
+        h('label', { style: 'display:block;margin:0 0 10px;font-weight:400' }, chk, ' Loại trừ các mục này luôn (lưu vào Cài đặt, lần sau không hỏi)'),
+        h('div', { style: 'display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap' },
+          h('button', { type: 'button', class: 'btn btn-sm btn-default', onclick: () => done('skip') }, 'Chưa ký Tổng kết'),
+          h('button', {
+            type: 'button', class: 'btn btn-sm btn-primary',
+            onclick: () => {
+              if (chk.checked) { const c = loadCfg(); c.exclude = [...new Set([...(c.exclude || []), ...miss.map((x) => x.lck)])]; saveCfg(c); }
+              done('go');
+            },
+          }, 'Bỏ qua các mục này, ký Tổng kết')));
+      const overlay = h('div', { style: overlayStyle }, box);
+      document.body.appendChild(overlay);
+    });
+  }
+
   let signing = false;
   async function autoSign(opts) {
     if (signing) return;
@@ -539,6 +601,7 @@
     try {
       if (!(opts && opts.batch) && window.__kskAssign && !(await window.__kskAssign.ensure())) { toast('Đã huỷ, chưa ký gì.'); return ['Đã huỷ']; }
       const cfg = loadCfg();
+      const opt = optionalSet(cfg);
       await ensureRendered();
       const prof = currentProfile();
       const myId = $('user_id') ? $('user_id').value : '';
@@ -575,23 +638,38 @@
       if (prof && prof.tongKet && !rep.fail.length) {
         const tkSigned = () => { const b = $('btnHuyCaTong'); return !!b && !inactive(b); };
         const kyTk = $('btnKyCaTong');
-        const allClassified = SECTIONS.every((x) => { if (OPTIONAL.has(x.lck)) return true; const e = $(x.cls); return !!e && !isUnset(e.value); });
         const sel = $('cboPHANLOAISUCKHOE_CHON');
+        // mục chưa có phân loại hoặc chưa ký (trừ các mục được loại trừ)
+        const tkMissing = () => SECTIONS.filter((x) => !opt.has(x.lck)).filter((x) => { const e = $(x.cls); return !(e && !isUnset(e.value)) || !isSigned(x.lck); });
         if (tkSigned()) L.push('Tổng kết: đã ký từ trước.');
-        else if (!allClassified) L.push('Tổng kết: chưa ký vì còn mục chưa có phân loại.');
         else if (!sel || isUnset(sel.value)) L.push('Tổng kết: chưa ký vì chưa chọn phân loại sức khỏe (bấm Auto điền trước).');
-        else if (SECTIONS.some((x) => !OPTIONAL.has(x.lck) && !isSigned(x.lck))) L.push('Tổng kết: chưa ký vì còn mục chưa ký: ' + SECTIONS.filter((x) => !OPTIONAL.has(x.lck) && !isSigned(x.lck)).map((x) => x.label).join(', ') + ' (Tổng kết phải ký sau cùng).');
         else if (!kyTk || inactive(kyTk)) L.push('Tổng kết: nút "Ký số & In" đang mờ.');
         else {
-          toast('Đang ký Tổng kết…', 120000);
-          kyTk.click();
-          let done = false;
-          for (let i = 0; i < 240 && !done; i++) {
-            await sleep(500);
-            acceptAlertify().forEach((m) => rep.msgs.push('Tổng kết: ' + m));
-            done = tkSigned();
+          // Còn mục chưa ký: cảnh báo chứ không chặn cứng. Bấm tay → hỏi; chạy tất cả → theo cài đặt "chỉ cảnh báo", nếu không thì bỏ qua Tổng kết và đi tiếp.
+          let go = true;
+          const miss = tkMissing();
+          if (miss.length) {
+            const names = miss.map((x) => x.label).join(', ');
+            if (opts && opts.batch) {
+              if (cfg.tkForce) L.push('⚠ Tổng kết vẫn ký dù còn mục chưa ký/chưa phân loại: ' + names);
+              else { go = false; L.push('⚠ Tổng kết CHƯA ký: còn mục chưa ký/chưa phân loại: ' + names + ' (mục không cần thì loại trừ trong ⚙, hoặc bật "vẫn ký Tổng kết, chỉ cảnh báo").'); }
+            } else {
+              const ans = await askTkWarn(miss);
+              if (ans === 'skip') { go = false; L.push('Tổng kết: bạn chọn chưa ký (còn mục: ' + names + ').'); }
+              else L.push('⚠ Tổng kết đã ký khi còn mục chưa ký/chưa phân loại: ' + names);
+            }
           }
-          L.push(done ? 'Tổng kết: đã ký.' : 'Tổng kết: KHÔNG xác nhận được ký — kiểm tra cửa sổ SmartCA/e-Seal/in.');
+          if (go) {
+            toast('Đang ký Tổng kết…', 120000);
+            kyTk.click();
+            let done = false;
+            for (let i = 0; i < 240 && !done; i++) {
+              await sleep(500);
+              acceptAlertify().forEach((m) => rep.msgs.push('Tổng kết: ' + m));
+              done = tkSigned();
+            }
+            L.push(done ? 'Tổng kết: đã ký.' : 'Tổng kết: KHÔNG xác nhận được ký — kiểm tra cửa sổ SmartCA/e-Seal/in.');
+          }
         }
       } else if (prof && prof.tongKet) L.push('Tổng kết: chưa ký vì còn mục lỗi ở trên.');
       if (rep.msgs.length) L.push('Thông báo của HIS: ' + rep.msgs.join(' | '));
@@ -708,6 +786,14 @@
     kids.flat().forEach((c) => e.append(c && c.nodeType ? c : document.createTextNode(String(c))));
     return e;
   };
+  // Hộp thoại luôn có thanh cuộn; chiều cao theo phần nhìn thấy
+  const maxBoxH = () => {
+    let H = window.innerHeight;
+    try { H = Math.min(H, window.top.innerHeight - 140); } catch (e) { /* khác miền */ }
+    return Math.max(280, Math.floor(H * 0.92));
+  };
+  const boxStyle = (w) => 'background:#fff;width:min(' + w + 'px,95vw);max-height:' + maxBoxH() + 'px;overflow-y:scroll;margin:auto;border-radius:6px;padding:16px;font-size:13px;color:#222';
+  const overlayStyle = (z) => 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:' + z + ';display:flex;overflow:auto;padding:20px 0;box-sizing:border-box';
   const btn = (txt, fn, title) => h('button', { type: 'button', class: 'btn btn-sm btn-warning', style: 'margin:2px;cursor:pointer', title: title || '', onclick: fn }, txt);
 
   let toastEl;
@@ -731,7 +817,7 @@
   const BAR_KEY = 'kskAuto.bar.v1'; // {x, y, c}
   const bar = (kids) => {
     const st = readJSON(BAR_KEY, {}) || {};
-    const body = h('div', {}, kids);
+    const body = h('div', { style: 'overflow-y:auto;max-height:' + Math.max(200, maxBoxH() - 60) + 'px' }, kids);
     const tgl = h('span', { style: 'cursor:pointer;padding:0 6px;font-weight:700;font-size:14px', title: 'Thu gọn / mở rộng' });
     const head = h('div', {
       style: 'display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:move;user-select:none;' +
@@ -856,7 +942,7 @@
       const quick = people.map((q) => btn('Tất cả → ' + (q.label || q.hisUser), () => {
         conflicts.forEach((c) => { if (c.cands.some((x) => x.hisUser === q.hisUser)) setChoice(c.lck, q.hisUser); });
       }, 'Chọn bác sĩ này cho mọi mục mà bác sĩ đó có tick'));
-      const box = h('div', { style: 'background:#fff;width:min(820px,95vw);max-height:90vh;overflow:auto;border-radius:6px;padding:16px;font-size:13px;color:#222' },
+      const box = h('div', { style: boxStyle(820) },
         h('h4', { style: 'margin:0 0 6px' }, title || '🧩 Nhiều bác sĩ cùng phụ trách một mục — chọn ai làm'),
         h('div', { style: 'color:#555;margin-bottom:6px' }, 'Chỉ bác sĩ được chọn mới điền / ký mục đó. Lựa chọn được nhớ cho các lần sau.'),
         h('div', { style: 'margin-bottom:6px' }, ...quick),
@@ -871,7 +957,7 @@
               done(Object.assign({}, assign, chosen));
             },
           }, 'Xác nhận')));
-      const overlay = h('div', { style: 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:2147483002;display:flex;align-items:center;justify-content:center' }, box);
+      const overlay = h('div', { style: overlayStyle(2147483002) }, box);
       document.body.appendChild(overlay);
     });
   }
@@ -1005,7 +1091,7 @@
     const fSub = inp(nav.sub, 'Phòng (value; trống = giữ mặc định HIS)');
     const lab = (t, el) => h('label', { style: 'display:block;margin:0' }, h('div', { style: 'font-weight:600' }, t), el);
 
-    const box = h('div', { style: 'background:#fff;width:min(1000px,95vw);max-height:90vh;overflow:auto;border-radius:6px;padding:16px;font-size:13px;color:#222' },
+    const box = h('div', { style: boxStyle(1000) },
       h('h4', { style: 'margin:0 0 8px' }, '⚙ KSK Auto — tài khoản & điều hướng'),
       h('div', { style: 'font-weight:700' }, '1) Tài khoản bác sĩ (4 thông tin + khoa phụ trách; một bác sĩ có thể phụ trách nhiều khoa và Tổng kết)'),
       h('div', { style: 'color:#666;margin-bottom:4px' }, 'Mật khẩu được lưu dạng chữ thường trong Tampermonkey của máy này.'),
@@ -1037,7 +1123,7 @@
 
     document.body.appendChild(h('div', {
       id: 'kskFlowModal',
-      style: 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:2147483001;display:flex;align-items:center;justify-content:center',
+      style: overlayStyle(2147483001),
     }, box));
   }
 
