@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HIS - KSK >18 tuổi: Auto điền
 // @namespace    https://bvbacgiang.vncare.vn/
-// @version      0.5.4
+// @version      0.5.5
 // @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK → Auto ký số (SmartCA/e-Seal).
 // @author       sosadsonar
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
@@ -54,6 +54,7 @@
     doiTuong: '13',            // 13 = Người lao động
     dangDieuTri: '0',          // Hiện tại có đang điều trị bệnh gì không? 0 = Không
     thaiSan: '0',              // Tiền sử thai sản: 0 = Không
+    tienSuGiaDinh: '0',        // Có ai trong gia đình mắc bệnh truyền nhiễm/di truyền…: 0 = Không
   };
 
   // lck = giá trị thuộc tính loai-chuyen-khoa của nút Lưu / Ký số
@@ -112,6 +113,7 @@
     { id: 'cboDOITUONG', cfg: 'doiTuong', kind: 'multi', label: 'Đối tượng' },
     { id: 'cboTSBTDANGDIEUTRIBENH', cfg: 'dangDieuTri', kind: 'sel', label: 'Đang điều trị bệnh' },
     { id: 'cboTSBTTHAISAN', cfg: 'thaiSan', kind: 'sel', label: 'Tiền sử thai sản' },
+    { id: 'cboTIENSUGIADINH_CHON', cfg: 'tienSuGiaDinh', kind: 'sel', label: 'Tiền sử gia đình' },
   ];
   const NGUON_CHI_TRA = [['1', 'Ngân sách Trung ương'], ['2', 'Ngân sách Địa phương'], ['3', 'Quỹ Bảo hiểm y tế'], ['4', 'Người sử dụng lao động'], ['5', 'Xã hội hóa'], ['9', 'Khác']];
   const DOI_TUONG = [['1', 'Người cao tuổi'], ['2', 'Người khuyết tật'], ['3', 'Người thuộc hộ nghèo, cận nghèo'], ['4', 'Người có công'], ['5', 'Người mắc bệnh mạn tính'],
@@ -609,6 +611,7 @@
     const selDoiTuong = mkSel(DOI_TUONG, cfg.doiTuong, '— không điền —');
     const selDieuTri = ktSel(cfg.dangDieuTri);
     const selThaiSan = ktSel(cfg.thaiSan);
+    const selGiaDinh = ktSel(cfg.tienSuGiaDinh);
     const labSel = (t, e) => h('label', { style: 'display:block;margin:0' }, h('div', { style: 'font-weight:600' }, t), e);
     const exChk = SECTIONS.map((x) => {
       const c = h('input', { type: 'checkbox' });
@@ -645,7 +648,8 @@
         labSel('Nguồn chi trả', selNguon),
         labSel('Đối tượng', selDoiTuong),
         labSel('Hiện tại có đang điều trị bệnh gì không?', selDieuTri),
-        labSel('Tiền sử thai sản', selThaiSan)),
+        labSel('Tiền sử thai sản', selThaiSan),
+        labSel('Tiền sử gia đình (có ai mắc bệnh…)', selGiaDinh)),
       h('div', { style: 'font-weight:700;margin-top:12px' }, '3) Lưu & tuỳ chọn'),
       h('div', { style: 'margin:6px 0' }, h('label', { style: 'margin:0' }, 'Sau khi điền: ', saveSel)),
       h('div', { style: 'margin:4px 0' }, h('label', { style: 'margin:0' }, chkOver, ' Ghi đè cả ô đã có nội dung (mặc định: chỉ điền ô trống)')),
@@ -681,6 +685,7 @@
             n.doiTuong = selDoiTuong.value;
             n.dangDieuTri = selDieuTri.value;
             n.thaiSan = selThaiSan.value;
+            n.tienSuGiaDinh = selGiaDinh.value;
             n.doctors = {};
             Object.entries(docSel).forEach(([k, s]) => { if (s.value) n.doctors[k] = s.value; });
             saveCfg(n);
