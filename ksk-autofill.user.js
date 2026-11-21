@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         HIS - KSK >18 tuổi: Auto điền
 // @namespace    https://bvbacgiang.vncare.vn/
-// @version      0.5.1
-// @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK. Ký số sẽ bổ sung sau.
+// @version      0.5.2
+// @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK → Auto ký số (SmartCA/e-Seal).
 // @author       sosadsonar
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
 // @match        https://bvbacgiang.vncare.vn/vnpthis/login/login.jsp*
@@ -47,6 +47,13 @@
     exclude: ['COXUONGKHOP'],  // mục không bắt buộc: để trống/chưa ký vẫn không chặn Tổng kết
     autoGender: true,          // bệnh nhân Nam → tự loại trừ Sản phụ khoa
     tkForce: false,            // luồng chạy tất cả: true = vẫn ký Tổng kết (chỉ cảnh báo) khi còn mục chưa ký
+    // Tab "Thông tin - Tiền sử, bệnh sử": ai bấm Auto điền trước thì điền (chỉ ô đang trống) rồi Lưu chung
+    info: true,
+    lyDoKham: 'Khám sức khỏe định kỳ',
+    nguonChiTra: '9',          // 9 = Khác
+    doiTuong: '13',            // 13 = Người lao động
+    dangDieuTri: '0',          // Hiện tại có đang điều trị bệnh gì không? 0 = Không
+    thaiSan: '0',              // Tiền sử thai sản: 0 = Không
   };
 
   // lck = giá trị thuộc tính loai-chuyen-khoa của nút Lưu / Ký số
@@ -97,6 +104,20 @@
   ];
 
   const TAB_IDS = [1, 2, 3, 4, 5, 6, 7].map((i) => 'clinicalSpecialtyTab' + i);
+
+  // Tab "Thông tin - Tiền sử, bệnh sử" (các ô radio tiền sử HIS đã mặc định "Không" nên không đụng)
+  const INFO = [
+    { id: 'txtLYDOKHAM', cfg: 'lyDoKham', kind: 'text', label: 'Lý do khám' },
+    { id: 'cboNGUONCHITRA', cfg: 'nguonChiTra', kind: 'sel', label: 'Nguồn chi trả' },
+    { id: 'cboDOITUONG', cfg: 'doiTuong', kind: 'multi', label: 'Đối tượng' },
+    { id: 'cboTSBTDANGDIEUTRIBENH', cfg: 'dangDieuTri', kind: 'sel', label: 'Đang điều trị bệnh' },
+    { id: 'cboTSBTTHAISAN', cfg: 'thaiSan', kind: 'sel', label: 'Tiền sử thai sản' },
+  ];
+  const NGUON_CHI_TRA = [['1', 'Ngân sách Trung ương'], ['2', 'Ngân sách Địa phương'], ['3', 'Quỹ Bảo hiểm y tế'], ['4', 'Người sử dụng lao động'], ['5', 'Xã hội hóa'], ['9', 'Khác']];
+  const DOI_TUONG = [['1', 'Người cao tuổi'], ['2', 'Người khuyết tật'], ['3', 'Người thuộc hộ nghèo, cận nghèo'], ['4', 'Người có công'], ['5', 'Người mắc bệnh mạn tính'],
+    ['6', 'Người sống tại vùng đồng bào DTTS và miền núi'], ['7', 'Người sống tại vùng KT-XH khó khăn'], ['8', 'Người sống tại xã đảo'], ['9', 'Người sống tại đặc khu'],
+    ['10', 'Trẻ em mầm non'], ['11', 'Học sinh phổ thông'], ['12', 'Sinh viên'], ['13', 'Người lao động'], ['14', 'Người lao động không chính thức'],
+    ['15', 'Người chưa có BHYT'], ['16', 'Các đối tượng khác']];
 
   // ───────────────────────────── Tiện ích ─────────────────────────────
   const $ = (id) => document.getElementById(id);
@@ -195,6 +216,11 @@
     const huy = document.querySelector('button#btnHuyKySo[loai-chuyen-khoa="' + lck + '"]');
     const ky = document.querySelector('button#btnKySo[loai-chuyen-khoa="' + lck + '"]');
     return !!huy && !inactive(huy) && !!ky && inactive(ky);
+  };
+  // Tổng kết đã ký: HIS khoá nút "Ký số & In" (#btnKyCaTong) và ô Phân loại sức khỏe; nút "Hủy ký" (#btnHuyCaTong) thì luôn sáng nên không dùng được
+  const isTkSigned = () => {
+    const k = $('btnKyCaTong'), sel = $('cboPHANLOAISUCKHOE_CHON');
+    return !!k && k.disabled && !!sel && sel.disabled;
   };
   const findSaveBtn = (lck) =>
     [...document.querySelectorAll('button[loai-chuyen-khoa="' + lck + '"]')]
@@ -299,6 +325,36 @@
     return parts.length ? parts.join('; ') : cfg.none;
   }
 
+  // Điền tab Thông tin (chỉ ô trống, trừ khi bật Ghi đè). Trả về danh sách ô đã điền.
+  function fillInfo(cfg) {
+    const done = [];
+    const empty = (v) => v === '' || v === '-1' || v == null;
+    const uw = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    for (const f of INFO) {
+      const el = $(f.id);
+      const v = cfg[f.cfg];
+      if (!el || v === '' || v == null || el.disabled || userEdited(f.id)) continue;
+      if (f.kind === 'text') {
+        if ((cfg.overwrite || !el.value.trim()) && setVal(el, v)) done.push(f.label);
+      } else if (f.kind === 'sel') {
+        if ((cfg.overwrite || empty(el.value)) && el.value !== String(v) && setSelect(el, v)) done.push(f.label);
+      } else if (f.kind === 'multi') {
+        const sel = [...el.options].filter((o) => o.selected).map((o) => o.value);
+        if (sel.includes(String(v)) || (sel.length && !cfg.overwrite)) continue;
+        const opt = [...el.options].find((o) => o.value === String(v));
+        if (!opt) continue;
+        // SumoSelect (plugin của HIS): chọn qua API để giao diện cập nhật; không có thì đặt thẳng
+        const pel = uw.document.getElementById(f.id);
+        try {
+          if (pel && pel.sumo) { if (cfg.overwrite) pel.sumo.unSelectAll(); pel.sumo.selectItem(String(v)); }
+          else { if (cfg.overwrite) [...el.options].forEach((o) => { o.selected = false; }); opt.selected = true; fire(el, 'change'); }
+        } catch (e) { opt.selected = true; fire(el, 'change'); }
+        if (opt.selected) done.push(f.label);
+      }
+    }
+    return done;
+  }
+
   let running = false;
   async function autoFill(opts) {
     if (running) return;
@@ -322,6 +378,7 @@
       if (prof) rep.msgs.push('Theo phân công của ' + (prof.label || prof.hisUser));
       if (profMismatch) rep.errs.push(profMismatch);
       if (cfg.onlyMine && !myId && !prof) rep.errs.push('Không đọc được tài khoản HIS đang đăng nhập (user_id) nên không lọc theo bác sĩ');
+      const infoDone = cfg.info ? fillInfo(cfg) : [];
 
       for (const s of SECTIONS) {
         if (stopped(t0)) { rep.errs.push('đã dừng theo yêu cầu (⏹)'); break; }
@@ -360,7 +417,7 @@
 
       // Tổng kết: phân loại = loại cao nhất (số La Mã lớn nhất) trong các phân loại đã chọn
       let tkTouched = false;
-      const tkSigned = (() => { const b = $('btnHuyCaTong'); return !!b && !inactive(b); })();
+      const tkSigned = isTkSigned();
       // Chỉ điền Tổng kết khi mọi mục đã có phân loại (tránh tính thiếu khi bác sĩ khác chưa điền/lưu)
       const unclassified = SECTIONS.filter((s) => { if (opt.has(s.lck)) return false; const e = $(s.cls); return !(e && !isUnset(e.value)); });
       const allClassified = !unclassified.length;
@@ -390,13 +447,14 @@
           await sleep(SAVE_DELAY);
           rep.msgs.push(...dismissAlerts());
         }
-        if (tkTouched && $('btnLuu')) { $('btnLuu').click(); await sleep(SAVE_DELAY); rep.msgs.push(...dismissAlerts()); }
+        if ((tkTouched || infoDone.length) && $('btnLuu')) { $('btnLuu').click(); await sleep(SAVE_DELAY); rep.msgs.push(...dismissAlerts()); }
       } else if (cfg.saveMode === 'main') {
-        if ((toSave.length || tkTouched) && $('btnLuu')) { $('btnLuu').click(); await sleep(SAVE_DELAY); rep.msgs.push(...dismissAlerts()); }
+        if ((toSave.length || tkTouched || infoDone.length) && $('btnLuu')) { $('btnLuu').click(); await sleep(SAVE_DELAY); rep.msgs.push(...dismissAlerts()); }
       }
 
       const L = [`Đã điền ${rep.filled.length} mục` + (filterMine ? ` (tài khoản user_id ${myId})` : '') +
         (cfg.saveMode === 'none' ? ' (chưa lưu).' : cfg.saveMode === 'main' ? ' và bấm Lưu chung.' : ' và bấm Lưu từng mục.')];
+      if (infoDone.length) L.push('Tab Thông tin: đã điền ' + infoDone.join(', '));
       if (rep.tk.length) L.push('Tổng kết: ' + rep.tk.join('; '));
       if (rep.signed.length) L.push('Bỏ qua (đã ký): ' + rep.signed.join(', '));
       if (rep.notMine.length) L.push('Mục của bác sĩ khác (bỏ qua): ' + rep.notMine.join(', '));
@@ -477,6 +535,15 @@
     const chkSum = h('input', { type: 'checkbox' }); chkSum.checked = !!cfg.summary;
     const chkGender = h('input', { type: 'checkbox' }); chkGender.checked = !!cfg.autoGender;
     const chkForce = h('input', { type: 'checkbox' }); chkForce.checked = !!cfg.tkForce;
+    // Tab Thông tin
+    const chkInfo = h('input', { type: 'checkbox' }); chkInfo.checked = !!cfg.info;
+    const mkSel = (list, val, emptyTxt) => { const e = h('select', { style: 'width:100%;padding:3px' }, h('option', { value: '' }, emptyTxt), list.map(([v, t]) => h('option', { value: v }, t))); e.value = val || ''; return e; };
+    const ktSel = (val) => mkSel([['0', 'Không'], ['1', 'Có']], val, '— không điền —');
+    const selNguon = mkSel(NGUON_CHI_TRA, cfg.nguonChiTra, '— không điền —');
+    const selDoiTuong = mkSel(DOI_TUONG, cfg.doiTuong, '— không điền —');
+    const selDieuTri = ktSel(cfg.dangDieuTri);
+    const selThaiSan = ktSel(cfg.thaiSan);
+    const labSel = (t, e) => h('label', { style: 'display:block;margin:0' }, h('div', { style: 'font-weight:600' }, t), e);
     const exChk = SECTIONS.map((x) => {
       const c = h('input', { type: 'checkbox' });
       c.checked = (cfg.exclude || []).includes(x.lck);
@@ -505,6 +572,14 @@
         h('label', { style: 'display:block;margin:0' }, h('div', { style: 'font-weight:600' }, 'Phân loại mặc định'), plSel),
         textField('hamTren', 'Răng hàm trên', 'để trống = không điền'),
         textField('hamDuoi', 'Răng hàm dưới', 'để trống = không điền')),
+      h('div', { style: 'font-weight:700;margin-top:12px' }, '2b) Tab "Thông tin - Tiền sử, bệnh sử" (chỉ điền ô trống; ai bấm Auto điền trước thì điền rồi bấm Lưu chung)'),
+      h('div', { style: 'margin:4px 0' }, h('label', { style: 'margin:0' }, chkInfo, ' Điền tab Thông tin')),
+      h('div', { style: grid },
+        textField('lyDoKham', 'Lý do khám sức khỏe', 'để trống = không điền'),
+        labSel('Nguồn chi trả', selNguon),
+        labSel('Đối tượng', selDoiTuong),
+        labSel('Hiện tại có đang điều trị bệnh gì không?', selDieuTri),
+        labSel('Tiền sử thai sản', selThaiSan)),
       h('div', { style: 'font-weight:700;margin-top:12px' }, '3) Lưu & tuỳ chọn'),
       h('div', { style: 'margin:6px 0' }, h('label', { style: 'margin:0' }, 'Sau khi điền: ', saveSel)),
       h('div', { style: 'margin:4px 0' }, h('label', { style: 'margin:0' }, chkOver, ' Ghi đè cả ô đã có nội dung (mặc định: chỉ điền ô trống)')),
@@ -526,7 +601,7 @@
           type: 'button', class: 'btn btn-sm btn-primary',
           onclick: () => {
             const n = loadCfg();
-            ['textNormal', 'none', 'thiLuc', 'noiThuong', 'noiTham', 'hamTren', 'hamDuoi'].forEach((k) => { n[k] = inputs[k].value.trim(); });
+            ['textNormal', 'none', 'thiLuc', 'noiThuong', 'noiTham', 'hamTren', 'hamDuoi', 'lyDoKham'].forEach((k) => { n[k] = inputs[k].value.trim(); });
             n.phanLoai = plSel.value;
             n.saveMode = saveSel.value;
             n.overwrite = chkOver.checked;
@@ -535,6 +610,11 @@
             n.exclude = exChk.filter((c) => c.el.checked).map((c) => c.lck);
             n.autoGender = chkGender.checked;
             n.tkForce = chkForce.checked;
+            n.info = chkInfo.checked;
+            n.nguonChiTra = selNguon.value;
+            n.doiTuong = selDoiTuong.value;
+            n.dangDieuTri = selDieuTri.value;
+            n.thaiSan = selThaiSan.value;
             n.doctors = {};
             Object.entries(docSel).forEach(([k, s]) => { if (s.value) n.doctors[k] = s.value; });
             saveCfg(n);
@@ -639,7 +719,7 @@
       if (rep.fail.length) L.push('KHÔNG xác nhận được ký: ' + rep.fail.join(', ') + ' — dừng lại, kiểm tra cửa sổ SmartCA/e-Seal rồi chạy lại.');
       // Tổng kết (chỉ bác sĩ phụ trách tổng kết): bấm "Ký số & In" khi mọi mục đã có phân loại và đã chọn phân loại sức khỏe
       if (prof && prof.tongKet && !rep.fail.length) {
-        const tkSigned = () => { const b = $('btnHuyCaTong'); return !!b && !inactive(b); };
+        const tkSigned = isTkSigned;
         const kyTk = $('btnKyCaTong');
         const sel = $('cboPHANLOAISUCKHOE_CHON');
         // mục chưa có phân loại hoặc chưa ký (trừ các mục được loại trừ)
@@ -753,11 +833,29 @@
   const clearFlow = () => GM_setValue(KEY.flow, '');
   // Khoa/Phòng: giá trị bạn đã chọn khi ghi thao tác (Khoa khám bệnh đa khoa, Phòng khám theo hợp đồng); để trống = giữ mặc định HIS
   const getNav = () => Object.assign({ fromDate: '', dept: '139535', sub: '143860' }, readJSON(KEY.nav, {}));
+  // Mặc định "Từ ngày" = ngày 1 của tháng hiện tại (21/11 → 01/11, 05/12 → 01/12)
   const defaultFrom = () => {
     const now = new Date();
-    let y = now.getFullYear();
-    if (new Date(y, 9, 1) > now) y -= 1;
-    return '01/10/' + y;
+    return '01/' + String(now.getMonth() + 1).padStart(2, '0') + '/' + now.getFullYear();
+  };
+  // Danh sách Khoa/Phòng đọc được ở trang Thiết lập phòng: {depts:[{v,t}], subs:{deptValue:[{v,t}]}}
+  const OPTS_KEY = 'kskAuto.deptOpts.v1';
+  const readOpts = (sel) => [...sel.options].filter((o) => o.value && o.value !== '-1').map((o) => ({ v: o.value, t: o.textContent.trim() }));
+  const cacheDeptOpts = () => {
+    const d = $('divSelectcboDEPT_ID'), s = $('divSelectcboSUBDEPT_ID');
+    if (!d || d.options.length < 2) return;
+    const c = readJSON(OPTS_KEY, {}) || {};
+    c.depts = readOpts(d);
+    c.subs = c.subs || {};
+    if (s && d.value && s.options.length > 1) c.subs[d.value] = readOpts(s);
+    writeJSON(OPTS_KEY, c);
+  };
+  // Sau khi đổi Khoa: chờ HIS nạp lại danh sách Phòng (khác danh sách cũ) rồi lưu
+  const subSig = () => { const s = $('divSelectcboSUBDEPT_ID'); return s ? [...s.options].map((o) => o.value).join(',') : ''; };
+  const cacheAfterDeptChange = async (prev) => {
+    await waitFor(() => { const s = $('divSelectcboSUBDEPT_ID'); return s && s.options.length > 1 && subSig() !== prev; }, 6000);
+    await sleep(300);
+    cacheDeptOpts();
   };
 
   // ───────────────────────── Tiện ích ─────────────────────────
@@ -1090,8 +1188,38 @@
     const fYear = inp(patient.year, 'Năm sinh');
     const fStt = inp(patient.stt, 'Số TT (nếu có 2 dòng trùng tên)');
     const fFrom = inp(nav.fromDate, 'Từ ngày dd/MM/yyyy (trống = ' + defaultFrom() + ')');
-    const fDept = inp(nav.dept, 'Khoa (value; trống = giữ mặc định HIS)');
-    const fSub = inp(nav.sub, 'Phòng (value; trống = giữ mặc định HIS)');
+    // Khoa / Phòng: chọn theo tên (lưu value). Danh sách lấy từ trang Thiết lập phòng (ô thật nếu đang ở đó, không thì bản đã lưu).
+    const liveDept = $('divSelectcboDEPT_ID');
+    if (liveDept) cacheDeptOpts();
+    const opts = readJSON(OPTS_KEY, {}) || {};
+    const selStyle = 'width:100%;padding:3px 6px';
+    const fDept = h('select', { style: selStyle });
+    const fSub = h('select', { style: selStyle });
+    const fillSel = (sel, list, cur, emptyTxt) => {
+      sel.replaceChildren(h('option', { value: '' }, emptyTxt));
+      list.forEach((o) => sel.append(h('option', { value: o.v }, o.t)));
+      if (cur && !list.some((o) => o.v === cur)) sel.append(h('option', { value: cur }, 'Mã ' + cur + ' (chưa có tên — mở trang Thiết lập phòng 1 lần)'));
+      sel.value = cur || '';
+    };
+    fillSel(fDept, opts.depts || [], nav.dept, '— giữ mặc định HIS —');
+    const subHint = h('div', { style: 'color:#888;font-size:11px' });
+    const fillSub = (cur) => {
+      const list = (opts.subs || {})[fDept.value] || [];
+      fillSel(fSub, list, cur, '— giữ mặc định HIS —');
+      subHint.textContent = fDept.value && !list.length ? 'Chưa có danh sách phòng của khoa này: mở trang Thiết lập phòng rồi mở ⚙ ở đó.' : '';
+    };
+    fillSub(nav.sub);
+    fDept.addEventListener('change', async () => {
+      // Đang ở trang Thiết lập phòng: chọn khoa ở ô thật để HIS tải danh sách phòng
+      const prev = subSig();
+      if (liveDept && fDept.value && liveDept.value !== fDept.value && setSel(liveDept, fDept.value)) {
+        subHint.textContent = 'Đang tải danh sách phòng…';
+        await cacheAfterDeptChange(prev);
+        Object.assign(opts, readJSON(OPTS_KEY, {}) || {});
+      }
+      fillSub('');
+    });
+    if (!(opts.depts || []).length) subHint.textContent = 'Chưa có danh sách khoa: mở trang Thiết lập phòng (Đăng nhập → Thiết lập phòng) rồi mở ⚙ ở đó.';
     const lab = (t, el) => h('label', { style: 'display:block;margin:0' }, h('div', { style: 'font-weight:600' }, t), el);
 
     const box = h('div', { style: boxStyle(1000) },
@@ -1103,7 +1231,8 @@
       h('div', { style: 'font-weight:700;margin-top:12px' }, '2) Bệnh nhân hiện tại'),
       h('div', { style: 'display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px;margin:6px 0' }, lab('Họ tên', fName), lab('Năm sinh', fYear), lab('Số TT', fStt)),
       h('div', { style: 'font-weight:700;margin-top:12px' }, '3) Điều hướng'),
-      h('div', { style: 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:6px 0' }, lab('Từ ngày', fFrom), lab('Khoa (value)', fDept), lab('Phòng (value)', fSub)),
+      h('div', { style: 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:6px 0' }, lab('Từ ngày (trống = ngày 1 tháng này)', fFrom), lab('Khoa', fDept), lab('Phòng', fSub)),
+      subHint,
       h('div', { style: 'margin-top:12px;display:flex;gap:8px;justify-content:flex-end' },
         h('button', { type: 'button', class: 'btn btn-sm btn-default', onclick: closeSettings }, 'Đóng'),
         h('button', {
@@ -1193,6 +1322,13 @@
   async function initSelDept() {
     rerender = () => {};
     bar([btn('⏏ Đăng xuất', () => { clearBatch(); GM_setValue('kskAuto.stop.v1', Date.now()); doLogout(); }), btn('⚙ Cài đặt', openSettings)]);
+    // Ghi nhớ danh sách Khoa / Phòng (để ⚙ hiện tên cho chọn); bạn đổi khoa nào thì lưu luôn danh sách phòng của khoa đó
+    waitFor(() => { const s = $('divSelectcboDEPT_ID'); return s && s.options.length > 1 && s; }, 20000).then((d) => {
+      if (!d) return;
+      cacheDeptOpts();
+      let sig = subSig();
+      d.addEventListener('change', () => { const prev = sig; cacheAfterDeptChange(prev).then(() => { sig = subSig(); }); });
+    });
     const f = getFlow();
     if (!f) return;
     if (f.stage === 'kb') { gotoUrl(URL_KB); return; }          // đã bấm Thiết lập phòng, trang vừa tải lại
@@ -1202,6 +1338,7 @@
     const nav = getNav();
     const dept = await waitFor(() => { const s = $('divSelectcboDEPT_ID'); return s && s.options.length > 1 && s; }, 20000);
     if (!dept) return stopFlow('Dừng: không thấy ô chọn Khoa');
+    cacheDeptOpts();
     if (nav.dept && dept.value !== nav.dept && !setSel(dept, nav.dept)) return stopFlow('Dừng: Khoa value ' + nav.dept + ' không có trong danh sách');
     const sub = $('divSelectcboSUBDEPT_ID');
     if (nav.sub) {
@@ -1209,6 +1346,7 @@
       if (!ok) return stopFlow('Dừng: Phòng value ' + nav.sub + ' không có trong danh sách');
       if (sub.value !== nav.sub) setSel(sub, nav.sub);
     }
+    cacheDeptOpts();
     const okBtn = $('divSelectbtnOK');
     if (!okBtn) return stopFlow('Dừng: không thấy nút Thiết lập phòng');
     setFlow('kb'); // trang sẽ tải lại, bước tiếp theo chạy ở lần tải sau
@@ -1373,6 +1511,11 @@
 
   // ───────────────────────── Trang khác (sau đăng nhập, trước khi tới SelDept) ─────────────────────────
   function initOther() {
+    // Đăng xuất đôi khi bị HIS trả lỗi 500 ở trang servlet Logout → chạy tất cả bị kẹt; tự về trang đăng nhập để đi tiếp
+    if (IS_TOP && /\/servlet\/login\.Logout/i.test(location.pathname)) {
+      const b = getBatch();
+      if (b && b.phase === 'next') { setTimeout(() => { location.href = 'https://bvbacgiang.vncare.vn/vnpthis/login/login.jsp'; }, 1500); return; }
+    }
     const f = getFlow();
     if (!f) return;
     if (f.stage === 'room') gotoUrl(URL_SELDEPT);
@@ -1396,10 +1539,12 @@
   const onHis = location.hostname === 'bvbacgiang.vncare.vn';
   if (!onCA && !onHis) return;
   const rj = (k) => { try { const v = GM_getValue(k, ''); return v ? JSON.parse(v) : null; } catch (e) { return null; } };
-  const sign = rj('kskAuto.sign.v1');
-  if (!sign || Date.now() - sign.t > 20 * 60 * 1000) return;
-  const cur = rj('kskAuto.cur.v1');
-  const prof = cur && (rj('kskAuto.profiles.v1') || []).find((p) => p.hisUser === cur.hisUser);
+  // Đọc lại mỗi lần: cờ ký được đặt SAU khi frame đã tải (bấm nút lúc đang mở phiếu)
+  const signing = () => { const s = rj('kskAuto.sign.v1'); return !!s && Date.now() - s.t < 20 * 60 * 1000; };
+  const curProf = () => {
+    const cur = rj('kskAuto.cur.v1');
+    return (cur && (rj('kskAuto.profiles.v1') || []).find((p) => p.hisUser === cur.hisUser)) || null;
+  };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const waitFor = async (fn, timeout, step = 300) => {
     const t0 = Date.now();
@@ -1416,14 +1561,20 @@
 
   if (onCA) {
     (async () => {
+      if (!signing()) return;
+      const prof = curProf();
       if (!prof || !prof.caUser || !prof.caPass) return; // thiếu tài khoản CA → để bạn tự đăng nhập
-      const last = Number(GM_getValue('kskAuto.caTry.v1', 0));
-      if (Date.now() - last < 90000) return; // vừa thử rồi (có thể sai mật khẩu) → không lặp
+      // Chống lặp khi sai mật khẩu: chỉ chặn nếu CHÍNH tài khoản CA này vừa thử trong 90 giây.
+      // (Bản cũ chặn chung mọi bác sĩ → chạy tất cả: bác sĩ kế tiếp trong 90 giây bị kẹt ở trang SmartCA.)
+      let last = null;
+      try { last = JSON.parse(GM_getValue('kskAuto.caTry.v1', '') || 'null'); } catch (e) { /* giá trị cũ dạng số */ }
+      if (last && last.u === prof.caUser && Date.now() - last.t < 90000) { console.warn('[KSK auto] SmartCA: tài khoản ' + prof.caUser + ' vừa thử < 90s, không tự đăng nhập lại (sai mật khẩu?)'); return; }
       const u = await waitFor(() => document.getElementById('Username'), 15000);
       const pw = document.getElementById('txtPassword');
       const b = document.getElementById('button');
       if (!u || !pw || !b) return;
-      GM_setValue('kskAuto.caTry.v1', Date.now());
+      GM_setValue('kskAuto.caTry.v1', JSON.stringify({ u: prof.caUser, t: Date.now() }));
+      console.log('[KSK auto] SmartCA: tự đăng nhập ' + prof.caUser);
       setVal(u, prof.caUser);
       setVal(pw, prof.caPass);
       b.click();
@@ -1431,24 +1582,26 @@
     return;
   }
 
-  // Hộp e-Seal trong HIS: có #btnConfirm + #password (+ #username nếu hiển thị)
-  (async () => {
-    const t0 = Date.now();
-    while (Date.now() - t0 < 20 * 60 * 1000) {
-      const bc = document.getElementById('btnConfirm');
-      const pw = document.getElementById('password');
-      if (bc && pw && !bc.dataset.kskDone && visible(bc)) {
-        bc.dataset.kskDone = '1';
-        if (prof) {
-          const un = document.getElementById('username');
-          if (un && visible(un) && prof.caUser) setVal(un, prof.caUser);
-          if (prof.caPass) setVal(pw, prof.caPass);
-        }
-        await sleep(300);
-        if (pw.value) bc.click(); // chưa có mật khẩu CA thì để bạn tự nhập và bấm
-      }
-      await sleep(500);
-      if (!rj('kskAuto.sign.v1')) return;
+  // Hộp e-Seal trong HIS: có #btnConfirm + #password (+ #username nếu hiển thị).
+  // Theo dõi suốt trong mọi frame HIS (rẻ: chỉ getElementById mỗi giây), chỉ hành động khi đang Auto ký số.
+  // Hộp thường được dùng lại cho mục sau → đánh dấu theo từng lần hiện, bỏ dấu khi hộp ẩn.
+  let lastVisible = false;
+  setInterval(async () => {
+    const bc = document.getElementById('btnConfirm');
+    const pw = document.getElementById('password');
+    const vis = !!(bc && pw && visible(bc));
+    if (!vis) { if (lastVisible && bc) delete bc.dataset.kskDone; lastVisible = false; return; }
+    lastVisible = true;
+    if (bc.dataset.kskDone || !signing()) return;
+    bc.dataset.kskDone = '1';
+    const prof = curProf();
+    console.log('[KSK auto] thấy hộp e-Seal, tự điền', prof ? prof.label || prof.hisUser : '(không rõ bác sĩ)');
+    if (prof) {
+      const un = document.getElementById('username');
+      if (un && visible(un) && prof.caUser) setVal(un, prof.caUser);
+      if (prof.caPass) setVal(pw, prof.caPass);
     }
-  })();
+    await sleep(300);
+    if (pw.value) bc.click(); // chưa có mật khẩu CA thì để bạn tự nhập và bấm
+  }, 1000);
 })();
