@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HIS - KSK >18 tuổi: Auto điền
 // @namespace    https://bvbacgiang.vncare.vn/
-// @version      0.5.2
+// @version      0.5.4
 // @description  Tự điền phiếu Khám sức khỏe trên 18 tuổi (mỗi bác sĩ điền mục của mình) + luồng tự động: đăng nhập HIS → Thiết lập phòng → Khám bệnh → mở phiếu KSK → Auto ký số (SmartCA/e-Seal).
 // @author       sosadsonar
 // @match        https://bvbacgiang.vncare.vn/vnpthis/main/manager.jsp*
@@ -201,6 +201,42 @@
   };
   document.addEventListener('input', onUserEdit, true);
   document.addEventListener('change', onUserEdit, true);
+
+  // HIS: nút Lưu / Lưu & Đóng ở cuối phiếu CHỈ lưu "thông tin chung + Tổng kết"; nội dung từng mục khám
+  // (vd. "Các bệnh về TMH: Viêm xoang") chỉ được lưu bằng nút Lưu nhỏ của mục đó → sửa xong chỉ bấm Lưu chung
+  // thì mở lại phiếu lại thấy giá trị cũ. Ở đây ghi nhớ mục nào bạn đã sửa và tự bấm Lưu của mục đó trước khi Lưu chung chạy.
+  const dirtySecs = new Set();
+  const markDirty = (e) => {
+    if (!e.isTrusted || !e.target || !e.target.getAttribute) return;
+    const l = (e.target.getAttribute('loai-chuyen-khoa') || '').toUpperCase();
+    if (l && SECTIONS.some((x) => x.lck === l)) dirtySecs.add(l);
+  };
+  document.addEventListener('input', markDirty, true);
+  document.addEventListener('change', markDirty, true);
+  document.addEventListener('click', (e) => { // bạn tự bấm Lưu của mục → mục sạch
+    if (!e.isTrusted || !e.target.closest) return;
+    const sb = e.target.closest('button[data-specialty-action="save"]');
+    if (sb) dirtySecs.delete((sb.getAttribute('loai-chuyen-khoa') || '').toUpperCase());
+  }, true);
+  document.addEventListener('click', async (e) => {
+    if (!e.isTrusted || !e.target.closest) return;
+    const top = e.target.closest('#btnLuu, #btnLuuDong');
+    if (!top || top.dataset.kskBusy) return;
+    const pend = [...dirtySecs].filter((l) => { const b = findSaveBtn(l); return b && !b.disabled && !isSigned(l); });
+    if (!pend.length) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    top.dataset.kskBusy = '1';
+    try {
+      for (const l of pend) {
+        findSaveBtn(l).click();
+        await sleep(SAVE_DELAY);
+        dismissAlerts();
+        dirtySecs.delete(l);
+      }
+      toast('Đã lưu thêm các mục bạn vừa sửa: ' + pend.map((l) => (SECTIONS.find((x) => x.lck === l) || {}).label || l).join(', '), 6000);
+    } finally { delete top.dataset.kskBusy; }
+    top.click(); // click do script (isTrusted=false) → chạy tiếp nút Lưu chung của HIS
+  }, true);
   // Nút ⏹ (ở thanh KSK Auto) ghi mốc giờ; các vòng lặp điền/ký dừng khi mốc mới hơn lúc bắt đầu
   const stopped = (t0) => Number(GM_getValue('kskAuto.stop.v1', 0)) > t0;
   const isUnset = (v) => v === '' || v === '-1' || v === '0';
@@ -292,6 +328,27 @@
   }
 
   // ───────────────────────────── Logic điền ─────────────────────────────
+  // Tìm value bác sĩ trong ô chọn (option dạng "Tên - ngày sinh - LGG.xxx - Bác sỹ - Khoa …") theo tên đăng nhập HIS, dự phòng theo tên hiển thị
+  const plain = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/gi, 'd').replace(/\s+/g, ' ').trim().toLowerCase();
+  function findDoctorValue(selId, ow) {
+    const sel = $(selId);
+    if (!sel || !ow) return null;
+    const u = String(ow.hisUser || '').toLowerCase();
+    const opts = [...sel.options].filter((o) => o.value && o.value !== '0');
+    let m = u && opts.find((o) => o.textContent.toLowerCase().split(' - ').some((part) => part.trim() === u));
+    if (!m && ow.label) m = opts.find((o) => plain(o.textContent.split(' - ')[0]) === plain(ow.label));
+    return m ? m.value : null;
+  }
+
+  // Dữ liệu đã lưu được HIS nạp bất đồng bộ sau khi mở phiếu: điền khi chưa nạp xong thì ô trông như "trống",
+  // script điền mặc định + Lưu mục sẽ ĐÈ MẤT nội dung bác sĩ đã nhập. Chờ nạp xong (có mã phiếu + họ tên) rồi mới làm.
+  async function waitFormLoaded() {
+    const ok = await waitFor(() => { const m = $('txtMAPHIEUKSK'), t = $('txtTENBENHNHAN'); return m && t && m.value.trim() && t.value.trim(); }, 20000);
+    if (!ok) console.warn('[KSK auto] chưa thấy mã phiếu/họ tên sau 20s, vẫn tiếp tục');
+    await sleep(800);
+    return !!ok;
+  }
+
   async function ensureRendered() {
     const need = () => SECTIONS.flatMap((s) => [...s.fields.map((f) => f.id), s.cls, s.doc]).filter((id) => !$(id));
     if (!need().length) return [];
@@ -368,13 +425,15 @@
       if (!(opts && opts.batch) && window.__kskAssign && !(await window.__kskAssign.ensure())) { toast('Đã huỷ, chưa điền gì.'); return ['Đã huỷ']; }
       const cfg = loadCfg();
       const opt = optionalSet(cfg);
+      await waitFormLoaded();
       const missingEls = await ensureRendered();
       const rep = { filled: [], signed: [], noDoctor: [], badDoctor: [], notMine: [], missing: missingEls, msgs: [], tk: [], errs: [], mine: [] };
       const toSave = [];
       const myId = $('user_id') ? $('user_id').value : '';
       // Nếu đăng nhập bằng nút 🔑 (profile có gán khoa / tổng kết) thì theo phân công của profile; không thì theo user_id như trước
       const prof = currentProfile();
-      const filterMine = cfg.onlyMine && (!!prof || !!myId);
+      const allMode = opts && opts.all; // {mã mục: {hisUser, label}}: một tài khoản điền hộ cả nhóm, đặt bác sĩ phụ trách cho từng mục
+      const filterMine = !allMode && cfg.onlyMine && (!!prof || !!myId);
       if (prof) rep.msgs.push('Theo phân công của ' + (prof.label || prof.hisUser));
       if (profMismatch) rep.errs.push(profMismatch);
       if (cfg.onlyMine && !myId && !prof) rep.errs.push('Không đọc được tài khoản HIS đang đăng nhập (user_id) nên không lọc theo bác sĩ');
@@ -384,6 +443,13 @@
         if (stopped(t0)) { rep.errs.push('đã dừng theo yêu cầu (⏹)'); break; }
         // Bác sĩ khoa này không điền hộ bác sĩ khoa khác: chỉ làm các mục gán cho tài khoản đang đăng nhập
         const assigned = cfg.doctors[s.lck] || '';
+        let ownerVal = null;
+        if (allMode) {
+          const ow = allMode[s.lck];
+          if (!ow) { rep.noDoctor.push(s.label); continue; }
+          ownerVal = findDoctorValue(s.doc, ow);
+          if (!ownerVal) { rep.badDoctor.push(s.label + ' (' + (ow.label || ow.hisUser) + ')'); continue; }
+        }
         if (filterMine && prof) {
           if (!(prof.sections || []).includes(s.lck)) { rep.notMine.push(s.label); continue; }
         } else if (filterMine && assigned !== myId) { (assigned ? rep.notMine : rep.noDoctor).push(s.label); continue; }
@@ -404,7 +470,7 @@
 
         const d = $(s.doc);
         // đang lọc theo bác sĩ đăng nhập → chính bác sĩ đó là người khám mục này (không cần đặt trong ⚙)
-        const dv = filterMine && myId ? myId : cfg.doctors[s.lck];
+        const dv = allMode ? ownerVal : filterMine && myId ? myId : cfg.doctors[s.lck];
         if (d && userEdited(s.doc)) { /* bác sĩ do bạn tự chọn: giữ nguyên */ }
         else if (d) {
           if (!dv) rep.noDoctor.push(s.label);
@@ -685,6 +751,7 @@
       if (!(opts && opts.batch) && window.__kskAssign && !(await window.__kskAssign.ensure())) { toast('Đã huỷ, chưa ký gì.'); return ['Đã huỷ']; }
       const cfg = loadCfg();
       const opt = optionalSet(cfg);
+      await waitFormLoaded();
       await ensureRendered();
       const prof = currentProfile();
       const myId = $('user_id') ? $('user_id').value : '';
@@ -1097,7 +1164,24 @@
     const withEff = all.filter((p) => p.hisPass).map((p) => ({ p, e: effectiveOf(p, all, assign) })).filter((x) => x.e.sections.length || x.e.tongKet);
     if (!withEff.length) return say('Chưa có bác sĩ nào đủ tài khoản HIS và đã tick/được chọn mục phụ trách (vào ⚙).');
     withEff.sort((a, c) => (a.e.tongKet ? 1 : 0) - (c.e.tongKet ? 1 : 0));
-    batchLogin({ mode, queue: withEff.map((x) => x.p.hisUser), idx: 0, phase: 'run', tried: -1, results: [] });
+    // Điền: chỉ đăng nhập MỘT tài khoản (ưu tiên bác sĩ Tổng kết), điền hộ mọi mục và đặt bác sĩ phụ trách từng mục; không đăng xuất.
+    // (Ký số thì bắt buộc đúng bác sĩ đứng tên nên vẫn chạy từng người.)
+    if (mode === 'fill') {
+      const doer = withEff.find((x) => x.e.tongKet) || withEff[0];
+      return batchLogin({ mode, queue: [doer.p.hisUser], idx: 0, phase: 'run', tried: -1, results: [], stay: true, all: true, t0: Date.now() });
+    }
+    // Bác sĩ Tổng kết đi sau cùng: xong thì Ở LẠI tài khoản đó (không đăng xuất) để xem đủ chữ ký / in
+    const stay = withEff[withEff.length - 1].e.tongKet;
+    batchLogin({ mode, queue: withEff.map((x) => x.p.hisUser), idx: 0, phase: 'run', tried: -1, results: [], stay });
+  }
+
+  // {mã mục: {hisUser, label}} theo cách chia mục hiện tại (dùng cho chế độ một tài khoản điền hộ)
+  function ownersMap() {
+    const ps = readJSON(KEY.profiles, []).filter((p) => p.hisUser);
+    const assign = readJSON(KEY.assign, {}) || {};
+    const m = {};
+    ps.forEach((p) => effectiveOf(p, ps, assign).sections.forEach((l) => { m[l] = { hisUser: p.hisUser, label: p.label }; }));
+    return m;
   }
 
   // Trang login: tiếp tục chạy tất cả (sau khi đăng xuất) hoặc kết thúc
@@ -1132,9 +1216,23 @@
     if (!ready) return batchFail('không thấy form KSK');
     await sleep(1500);
     let lines = [];
-    try { lines = (b.mode === 'sign' ? await window.__kskRun.autoSign({ batch: true }) : await window.__kskRun.autoFill({ batch: true })) || []; } catch (e) { lines = ['Lỗi: ' + e.message]; }
+    try { lines = (b.mode === 'sign' ? await window.__kskRun.autoSign({ batch: true }) : await window.__kskRun.autoFill({ batch: true, all: b.all ? ownersMap() : null })) || []; } catch (e) { lines = ['Lỗi: ' + e.message]; }
     await sleep(1500);
+    if (b.stay && b.idx === b.queue.length - 1) return batchFinishStay(lines);
     batchNext(lines);
+  }
+
+  // Bác sĩ cuối (Tổng kết): không đăng xuất, mở tab Tổng kết, hiện kết quả cả lượt
+  function batchFinishStay(lines) {
+    const b = getBatch() || {};
+    const results = (b.results || []).concat([{ who: who(b), lines: [].concat(lines || []) }]);
+    clearBatch();
+    const tab = document.querySelector('a[href="#tabTongKet"]');
+    if (tab) tab.click();
+    const out = ['Xong chạy tất cả (' + (b.mode === 'sign' ? 'ký số' : 'điền') + (b.t0 ? ', ' + Math.round((Date.now() - b.t0) / 1000) + ' giây' : '') + '). Đang ở lại tài khoản Tổng kết: ' + (results[results.length - 1].who) + ' (không đăng xuất).'];
+    results.forEach((r) => out.push(r.who + ': ' + r.lines.join(' | ')));
+    say(out, 300000);
+    console.log('[KSK auto] chạy tất cả xong, ở lại tài khoản Tổng kết', out);
   }
 
   // ───────────────────────── Cài đặt: tài khoản, bệnh nhân, điều hướng ─────────────────────────
